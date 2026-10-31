@@ -1,0 +1,6 @@
+/out/
+/target/
+/dist/*.abp
+__pycache__/
+*.pyc
+.DS_Store

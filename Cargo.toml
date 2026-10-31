@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "chemclient"
+version = "1.2.0"
+edition = "2024"
+license = "AGPL-3.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "=0.60.0", features = ["async"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+aes = "0.8"
+cipher = { version = "0.4", features = ["block-padding"] }
+md-5 = "0.10"
+num-bigint = "0.4"
+mp3-duration = "0.1"
+shine-rs = "=0.1.5"
+nanomp3 = { path = "third_party/nanomp3" }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+waki = "0.5.1"
+tracing = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

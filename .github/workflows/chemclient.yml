@@ -1,0 +1,28 @@
+name: ChemClient
+on:
+  push:
+    paths: ['src/**', 'wit/**', 'third_party/**', '.cargo/**', 'Cargo.*', 'build.py', 'manifest.json', 'icon.png', 'index.txt', '.github/workflows/chemclient.yml']
+  pull_request:
+    paths: ['src/**', 'wit/**', 'third_party/**', '.cargo/**', 'Cargo.*', 'build.py', 'manifest.json', 'icon.png', 'index.txt', '.github/workflows/chemclient.yml']
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Install component linker for API 4
+        run: cargo install wasm-component-ld --version 0.5.27 --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo fmt --check
+      - run: python build.py --abp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChemClient
+          path: |
+            dist/
+          if-no-files-found: error
