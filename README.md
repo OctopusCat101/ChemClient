@@ -2,7 +2,7 @@
 
 AstroBox API 4 / WASI 2 plugin for NoirMusic: local MP3, NetEase search, QR login,
 playlists, direct native-module import and library management. No watch quick-app
-is needed for the new library. Existing Lyra storage remains intact.
+is needed. The plugin uses the native NoirMusic library.
 
 ## Build
 
@@ -17,7 +17,7 @@ Run from the repository root:
 
 Output stays entirely inside this plugin:
 
-    ChemClient/                 # repository root (upload importer contents)
+    ChemClient/                 # independent repository root
     ├── index.txt              # contains: dist
     ├── .github/workflows/chemclient.yml
     ├── third_party/nanomp3/    # bundled decoder source and licenses
@@ -29,7 +29,7 @@ Output stays entirely inside this plugin:
     └── out/cargo/              # ignored compilation cache
 
 ABP is for local installation; the plugin market reads the unpacked files.
-Upload the contents of importer/ as the GitHub repository root. Its index.txt
+Upload this repository as the GitHub repository root. Its index.txt
 contains the single relative path dist. All build inputs are inside this directory.
 
 To validate existing release files without compiling, run python build.py --check
