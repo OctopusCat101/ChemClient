@@ -1,0 +1,13 @@
+[package]
+name = "noirmusic-sbc-codec"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-2.1-or-later"
+description = "Streaming BlueZ SBC encoder with caller-owned state"
+
+[dependencies]
+nanomp3 = { path = "../nanomp3" }
+noirmusic-format = { path = "../noirmusic-format" }
+
+[lib]
+path = "src/lib.rs"

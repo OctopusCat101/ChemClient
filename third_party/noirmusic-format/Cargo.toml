@@ -1,0 +1,9 @@
+[package]
+name = "noirmusic-format"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+description = "Portable NoirMusic fixed-frame SBC container"
+
+[lib]
+path = "src/lib.rs"

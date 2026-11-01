@@ -1,6 +1,7 @@
 //! Incremental conversion inside WASI. Audio stays on disk, never whole-file PCM.
-use crate::{astrobox::psys_host_v4::timer, state, transfer, ui};
+use crate::{astrobox::psys_host_v4::timer, sbc, state, transfer, ui};
 use nanomp3::{Decoder, MAX_SAMPLES_PER_FRAME};
+use noirmusic_sbc_codec::resample::Resampler;
 use serde_json::Value;
 use shine_rs::{Mp3Encoder, Mp3EncoderConfig, StereoMode};
 use std::{
@@ -34,15 +35,13 @@ struct Job {
     pcm: Box<[i16; MAX_SAMPLES_PER_FRAME]>,
     converted: Vec<i16>,
     channels: usize,
-    source_rate: u32,
-    phase: u32,
-    sum: [i64; 2],
-    count: u32,
+    resampler: Resampler<24000>,
     total_frames: u64,
     bytes: u64,
     size: u64,
     timer: u64,
     last_render: Instant,
+    predecode: bool,
 }
 // The WASI event driver owns codec state on its thread. Neither decoder nor
 // encoder is Send; do not assert otherwise or hold a lock across host calls.
@@ -50,7 +49,14 @@ thread_local! { static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
 
 pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
     let quality = profile(quality);
+    let predecode = state::snapshot().predecode;
+    if predecode && !state::snapshot().sbc_supported {
+        return Err("请更新手环 NoirMusic 并重新连接后使用 SBC 预解码".into());
+    }
     if quality == 0 {
+        if predecode {
+            return sbc::start(path, song, temporary);
+        }
         return transfer::start(path, song, temporary).await;
     }
     if !state::snapshot().direct {
@@ -118,15 +124,13 @@ pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> 
             pcm: Box::new([0; MAX_SAMPLES_PER_FRAME]),
             converted: Vec::with_capacity(4608),
             channels,
-            source_rate: 0,
-            phase: 0,
-            sum: [0; 2],
-            count: 0,
+            resampler: Resampler::new(),
             total_frames: 0,
             bytes: offset,
             size,
             timer,
             last_render: Instant::now(),
+            predecode,
         })
     });
     state::with(|s| {
@@ -175,48 +179,36 @@ impl Job {
             }
             return Ok(false);
         };
-        if self.source_rate != info.sample_rate {
-            self.source_rate = info.sample_rate;
-            self.phase = 0;
-            self.sum = [0; 2];
-            self.count = 0;
-        }
         let source_channels = info.channels.num() as usize;
-        if info.sample_rate == 0
+        if !(8000..=48000).contains(&info.sample_rate)
             || !(1..=2).contains(&source_channels)
             || info.samples_produced > self.pcm.len() / source_channels
         {
             return Err("音频格式不受支持".into());
         }
+        self.resampler.configure(info.sample_rate);
         self.converted.clear();
-        // Continuous-phase box filter averages source samples before downsampling.
         for frame in
             self.pcm[..info.samples_produced * source_channels].chunks_exact(source_channels)
         {
-            let left = i64::from(frame[0]);
-            let right = i64::from(frame[source_channels - 1]);
-            self.sum[0] += if self.channels == 1 {
-                (left + right) / 2
+            let left = frame[0];
+            let right = frame[source_channels - 1];
+            let pair = if self.channels == 1 {
+                let mono = ((i32::from(left) + i32::from(right)) / 2) as i16;
+                [mono, mono]
             } else {
-                left
+                [left, right]
             };
-            self.sum[1] += right;
-            self.count += 1;
-            self.phase += 24000;
-            let mut emitted = false;
-            while self.phase >= info.sample_rate {
-                self.phase -= info.sample_rate;
-                for ch in 0..self.channels {
-                    self.converted
-                        .push((self.sum[ch] / i64::from(self.count)) as i16);
-                }
-                self.total_frames += 1;
-                emitted = true;
+            self.resampler.push(pair, &mut self.converted);
+        }
+        let frames = self.converted.len() / 2;
+        self.total_frames += frames as u64;
+        if self.channels == 1 {
+            // Compact only this decoder window; never retain whole-song PCM.
+            for i in 0..frames {
+                self.converted[i] = self.converted[i * 2];
             }
-            if emitted {
-                self.sum = [0; 2];
-                self.count = 0;
-            }
+            self.converted.truncate(frames);
         }
         if !self.converted.is_empty() {
             for bytes in self
@@ -243,6 +235,9 @@ impl Job {
     }
 }
 pub fn cancel() -> bool {
+    if sbc::cancel() {
+        return true;
+    }
     let Some(j) = JOB.with(|j| j.borrow_mut().take()) else {
         return false;
     };
@@ -271,6 +266,10 @@ fn dispose(j: Job, remove_output: bool) {
     }
 }
 pub async fn tick() {
+    if sbc::active() {
+        sbc::tick().await;
+        return;
+    }
     let Some(mut j) = JOB.with(|j| j.borrow_mut().take()) else {
         return;
     };
@@ -299,6 +298,7 @@ pub async fn tick() {
     }
     let path = j.output_path.clone();
     let song = j.song.clone();
+    let predecode = j.predecode;
     dispose(j, result.is_err());
     state::with(|s| {
         s.transcoding = false;
@@ -306,6 +306,14 @@ pub async fn tick() {
     });
     match result {
         Ok(_) => {
+            if predecode {
+                if let Err(e) = sbc::start(path.clone(), song, true) {
+                    let _ = fs::remove_file(path);
+                    state::error(e);
+                }
+                ui::rerender();
+                return;
+            }
             if let Err(e) = transfer::start(path.clone(), song, true).await {
                 let _ = fs::remove_file(path);
                 state::error(e);

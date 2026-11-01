@@ -326,17 +326,7 @@ fn build(s: &state::State) -> ui::Element {
                     ),
                     s.active,
                 ));
-            let mut quality = equal_row();
-            for (rate, label) in [(24000, "极省"), (64000, "均衡"), (0, "原文件")] {
-                quality = quality.child(equal(disabled(
-                    button(label, &format!("quality:{rate}"), s.bitrate == rate),
-                    s.active,
-                )));
-            }
-            pane = pane
-                .child(text("压缩方式", 13, MUTED))
-                .child(quality)
-                .child(text("极省：24k 单声道 · 均衡：64k 立体声", 13, MUTED));
+            pane = pane.child(compression_options(&s));
             if !s.cookie.is_empty() {
                 pane = pane.child(button("退出账号", "logout", false));
             }
@@ -468,6 +458,23 @@ fn compression_options(s: &state::State) -> ui::Element {
         .child(text("压缩方式", 14, MUTED))
         .child(choices)
         .child(text("极省：24k 单声道 · 均衡：64k 立体声", 13, MUTED))
+        .child(disabled(
+            button(
+                if s.predecode {
+                    "SBC 预解码 · 已开启"
+                } else {
+                    "SBC 预解码 · 已关闭"
+                },
+                "predecode",
+                s.predecode,
+            ),
+            s.active,
+        ))
+        .child(text(
+            "先按所选档位压缩，再预解码；占用更多空间，减轻手环播放负担",
+            13,
+            MUTED,
+        ))
 }
 fn ui_value(payload: &str) -> String {
     let Ok(v) = serde_json::from_str::<Value>(payload) else {
@@ -501,7 +508,7 @@ pub async fn event(id: &str, payload: &str) {
         _ => {}
     }
     // Navigation and editing remain responsive while a dialog/host call awaits.
-    if id.starts_with("tab:") || id.starts_with("quality:") || id == "cancel" {
+    if id.starts_with("tab:") || id.starts_with("quality:") || id == "predecode" || id == "cancel" {
         if let Err(e) = action(id, &value).await {
             state::with(|s| s.status = e);
         }
@@ -525,6 +532,14 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         state::with(|s| {
             if !s.active {
                 s.bitrate = transcode::profile(rate);
+            }
+        });
+        return Ok(());
+    }
+    if id == "predecode" {
+        state::with(|s| {
+            if !s.active {
+                s.predecode = !s.predecode;
             }
         });
         return Ok(());
@@ -593,7 +608,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             }
             // Conversion measures emitted samples. Avoid scanning the source
             // synchronously before a bounded compression job even starts.
-            let duration = if s.bitrate == 0 {
+            let duration = if s.bitrate == 0 && !s.predecode {
                 mp3_duration::from_path(&s.local_path)
                     .map_err(|e| format!("MP3 无法读取：{e}"))?
                     .as_millis()

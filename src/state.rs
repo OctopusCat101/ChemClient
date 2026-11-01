@@ -64,6 +64,8 @@ pub struct State {
     pub total: u64,
     pub speed: u64,
     pub bitrate: u32,
+    pub predecode: bool,
+    pub sbc_supported: bool,
     pub transcoding: bool,
 }
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();

@@ -4,9 +4,14 @@ AstroBox API 4 / WASI 2 plugin for NoirMusic: local MP3, NetEase search, QR logi
 playlists, direct native-module import and library management. No watch quick-app
 is needed. The plugin uses the native NoirMusic library.
 
+Version 1.3.1 uses streaming anti-alias FIR resampling for both MP3 compression
+and optional SBC preconversion. Selected compression still runs first; memory
+usage stays bounded independently of song length.
+
 ## Build
 
-Requires AstroBox 2.2.0 with API 4 support. Install stable Rust, Python 3.11+ and
+Requires AstroBox 2.2.0 with API 4 support. Install Clang/llvm-ar on PATH (or set
+CC and AR), stable Rust, Python 3.11+ and
 wasm-component-ld >= 0.5.27 (available in recent nightly toolchains). The builder
 automatically finds a compatible linker; --component-linker accepts an explicit path.
 Bindings are pinned to wit-bindgen 0.60.0, matching the Wasmtime 48 component ABI.
@@ -20,7 +25,7 @@ Output stays entirely inside this plugin:
     ChemClient/                 # independent repository root
     ├── index.txt              # contains: dist
     ├── .github/workflows/chemclient.yml
-    ├── third_party/nanomp3/    # bundled decoder source and licenses
+    ├── third_party/            # MP3/SBC codecs, format source and licenses
     ├── dist/
     │   ├── manifest.json
     │   ├── chemclient.wasm
@@ -73,5 +78,25 @@ in flight, including timer polls and retries. Send/registration failures are sho
 instead of silently leaving a pending request. No mutex is held across an await.
 
 After replacing a crashed API 3 release, completely exit/restart AstroBox, then
-install/reopen ChemClient 1.2.0. Reopening only the plugin does not recover the old
+install/reopen ChemClient 1.3.0. Reopening only the plugin does not recover the old
 panicked runtime.
+
+## Compression and optional SBC predecode
+
+Local and NetEase imports share two independent settings. First select the MP3
+compression quality (Extreme, Balanced, or Original), then optionally enable SBC
+predecode. Compression always runs first; SBC conversion uses its output. Original
+skips MP3 compression and converts the source directly. Disabling predecode keeps
+the MP3 import workflow.
+
+SBC predecode requires NoirMusic code59 or later on Band 9. Both stages process
+bounded windows and write to disk; neither loads a full song into memory. The
+client resamples to 44.1 kHz with a polyphase FIR and writes a fixed-frame NSB1
+file. Matching earphones receive those frames without wearable MP3 decoding or
+SBC encoding; a negotiated profile mismatch uses streaming integer SBC decode
+and re-encode. Pause, seeking and track changes use the normal player controls.
+
+SBC reduces wearable computation at the cost of storage and transfer time:
+the default Joint Stereo / bitpool39 stream is about 251 kbps, or 5.65 MB for
+three minutes. A preceding 24 kbps compression still reduces source quality;
+converting it to SBC cannot restore that quality or retain its small file size.

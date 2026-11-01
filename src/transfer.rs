@@ -292,6 +292,7 @@ pub async fn received(payload: &str) {
             } else {
                 state::with(|s| {
                     s.direct = true;
+                    s.sbc_supported = value["sbc_predecode"] == true;
                     s.status = "已直连 · 无需打开手环快应用".into();
                 });
                 Ok(())
@@ -400,12 +401,20 @@ pub async fn start(path: String, song: Value, temporary: bool) -> Result<(), Str
     }
     let mut file = File::open(&path).map_err(|e| format!("打开音频失败：{e}"))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
-    if size <= 128 || size > 128 * 1024 * 1024 {
-        return Err("请选择 128 MiB 以内的 MP3 音频".into());
+    if size <= 32 || size > 128 * 1024 * 1024 {
+        return Err("请选择 128 MiB 以内的音频".into());
     }
     let mut header = [0u8; 65536];
     let n = file.read(&mut header).map_err(|e| e.to_string())?;
-    if !header[..n].starts_with(b"ID3")
+    let sbc = noirmusic_format::Header::parse(&header[..n]);
+    if header[..n].starts_with(b"NSB1") && sbc.is_none() {
+        return Err("SBC 文件头无效".into());
+    }
+    if let Some(h) = sbc {
+        if !state::snapshot().sbc_supported || h.file_bytes() != size {
+            return Err("SBC 文件不完整或手环模块版本过旧".into());
+        }
+    } else if !header[..n].starts_with(b"ID3")
         && !header[..n]
             .windows(2)
             .any(|p| p[0] == 255 && p[1] & 0xe0 == 0xe0)
@@ -420,7 +429,10 @@ pub async fn start(path: String, song: Value, temporary: bool) -> Result<(), Str
         s.status = "正在准备导入".into();
         s.speed = 0;
     });
-    let args = serde_json::to_vec(&json!({"size":size,"song":song})).map_err(|e| e.to_string())?;
+    let args = serde_json::to_vec(
+        &json!({"size":size,"song":song,"format":if sbc.is_some() {"nsbc1"} else {"mp3"}}),
+    )
+    .map_err(|e| e.to_string())?;
     link(|l| {
         l.upload = Some(Upload {
             file,

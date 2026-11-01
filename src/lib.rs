@@ -4,6 +4,7 @@ use std::io::Read;
 
 mod netease;
 mod protocol;
+mod sbc;
 mod state;
 mod transcode;
 mod transfer;
