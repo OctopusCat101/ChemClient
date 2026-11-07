@@ -1,6 +1,6 @@
 # Audio compression dependencies
 
-ChemClient 1.3.1 uses shine-rs 0.1.5 (LGPL-2.0) for MP3 encoding.
+ChemClient 1.4.0 uses shine-rs 0.1.5 (LGPL-2.0) for MP3 encoding.
 Upstream: https://github.com/wshon/shine-rs ; exact registry revision is pinned in Cargo.lock.
 The upstream crate source and license are available with cargo vendor --locked.
 No changes to the encoder crate are included in this project.
@@ -22,3 +22,11 @@ end-user conversion.
 
 third_party/noirmusic-format is the vendored NSB1 format implementation shared
 with NoirMusic (AGPL-3.0). It is bundled so ChemClient builds independently.
+
+Artwork preparation uses image0.25.10 (MIT OR Apache-2.0), JPEG/PNG features only.
+Upstream: https://github.com/image-rs/image . Material theme quantization and role
+generation uses material-colors0.4.2 (MIT OR Apache-2.0), upstream
+https://github.com/Aiving/material-colors . Exact versions and transitive codecs
+are pinned in Cargo.lock; their sources/licenses are available using
+cargo vendor --locked. Both run in the phone/plugin; the wearable adds no image
+decoder. The client supplies the bounded NCV1 BGRA image and RGB565 theme roles.

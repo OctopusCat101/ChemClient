@@ -5,6 +5,7 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     sync::{Mutex, OnceLock},
@@ -30,6 +31,7 @@ struct Upload {
     started: Instant,
     chunk_len: u64,
     cancel_requested: bool,
+    asset: u8,
 }
 #[derive(Default)]
 struct Link {
@@ -41,6 +43,8 @@ struct Link {
     timer_id: u64,
     registered_addr: String,
     last_progress_render: Option<Instant>,
+    assets: VecDeque<(String, Value, String)>,
+    completed_assets: u8,
 }
 static LINK: OnceLock<Mutex<Link>> = OnceLock::new();
 fn link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
@@ -140,13 +144,13 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
     }
     let has_timer = link(|l| l.timer_id != 0);
     if !has_timer {
-        let id = timer::set_interval(100, "music-link");
+        let id = timer::set_interval(25, "music-link");
         link(|l| l.timer_id = id);
     }
     send_command(1, vec![]).await
 }
 pub async fn send_command(op: u8, args: Vec<u8>) -> Result<(), String> {
-    let addr = state::snapshot().addr;
+    let addr = state::with(|s| s.addr.clone());
     if addr.is_empty() {
         return Err("请先连接手环".into());
     }
@@ -203,14 +207,19 @@ pub async fn tick() {
         if p.since.elapsed().as_secs() > 30 {
             return Some(Err("手环响应超时，请确认启用了新版蓝牙音乐模块".to_string()));
         }
-        if p.last_send.elapsed().as_millis() < 100 {
+        // File ACKs are available only on the receive owner. Poll promptly
+        // during transfer, backing off when flash writes take longer.
+        let delay = if matches!(l.command, 3 | 4) {
+            (25u128 << p.polls.min(3)).min(100)
+        } else { 100 };
+        if p.last_send.elapsed().as_millis() < delay {
             return None;
         }
         p.last_send = Instant::now();
         p.polls = p.polls.saturating_add(1);
         p.sending = true;
         // Retrying exactly the same ID is safe. Poll never performs a file write.
-        if p.polls % 20 == 0 {
+        if p.polls % 20 == 0 && p.since.elapsed().as_secs() >= u64::from(p.attempts) * 2 {
             p.attempts = p.attempts.saturating_add(1);
             Some(Ok((p.id, p.frame.clone())))
         } else {
@@ -219,7 +228,7 @@ pub async fn tick() {
     });
     match resend {
         Some(Ok((id, frame))) => {
-            let addr = state::snapshot().addr;
+            let addr = state::with(|s| s.addr.clone());
             let _ = send_pending(addr, id, frame).await;
         }
         Some(Err(e)) => fail(e),
@@ -244,7 +253,7 @@ pub async fn received(payload: &str) {
             Some(p.frame.clone())
         });
         if let Some(frame) = frame {
-            let _ = send_pending(state::snapshot().addr, id, frame).await;
+            let _ = send_pending(state::with(|s| s.addr.clone()), id, frame).await;
         }
         return;
     }
@@ -293,6 +302,7 @@ pub async fn received(payload: &str) {
                 state::with(|s| {
                     s.direct = true;
                     s.sbc_supported = value["sbc_predecode"] == true;
+                    s.attachments_supported = value["media_assets"] == 1;
                     s.status = "已直连 · 无需打开手环快应用".into();
                 });
                 Ok(())
@@ -334,16 +344,30 @@ pub async fn received(payload: &str) {
             }
         }
         5 => {
+            // Only count assets after the watch acknowledged durable commit.
+            link(|l| { if let Some(u)=&l.upload { l.completed_assets |= u.asset; } });
             cleanup_upload();
+            let asset=link(|l|l.assets.pop_front());
+            if let Some((path,song,format))=asset {
+                let cleanup=path.clone();
+                let result=begin_upload(path,song,true,format).await;
+                if result.is_err() { let _=fs::remove_file(cleanup); }
+                result
+            } else {
+            let assets=link(|l|l.completed_assets);
             state::with(|s| {
                 s.active = false;
                 s.sent = s.total;
-                s.status = "导入完成 · 在手环音乐曲库中播放".into();
+                s.status = format!("导入完成 · {} · {}",
+                    if assets&1!=0 {"含封面"} else {"无封面"},
+                    if assets&2!=0 {"含歌词"} else {"无歌词"});
             });
             Ok(())
+            }
         }
         6 => {
             cleanup_upload();
+            cleanup_assets();
             state::with(|s| {
                 s.active = false;
                 s.status = "已取消，临时音频已移除".into();
@@ -392,18 +416,35 @@ pub async fn refresh_library() -> Result<(), String> {
 pub fn busy() -> bool {
     link(|l| l.pending.is_some() || l.upload.is_some())
 }
-pub async fn start(path: String, song: Value, temporary: bool) -> Result<(), String> {
+pub async fn start(path: String, mut song: Value, temporary: bool) -> Result<(), String> {
     if busy() {
         return Err("请先完成当前操作".into());
     }
     if !state::snapshot().direct {
         return Err("请先连接原生音乐模块".into());
     }
-    let mut file = File::open(&path).map_err(|e| format!("打开音频失败：{e}"))?;
+    link(|l| l.completed_assets=0);
+    let assets=song.as_object_mut().and_then(|s|s.remove("_attachments")).unwrap_or(Value::Null);
+    if let Some(assets)=assets.as_array() {
+        if !assets.is_empty() && !state::snapshot().attachments_supported { return Err("手环版本不支持封面与歌词".into()); }
+        link(|l|for item in assets {
+            if let (Some(path),Some(format))=(item["path"].as_str(),item["format"].as_str()) {
+                l.assets.push_back((path.into(),song.clone(),format.into()));
+            }
+        });
+    }
+    let result=begin_upload(path,song,temporary,String::new()).await;
+    if result.is_err() { cleanup_assets(); }
+    result
+}
+async fn begin_upload(path:String,song:Value,temporary:bool, mut format:String) -> Result<(),String> {
+    let mut file = File::open(&path).map_err(|e| format!("打开文件失败：{e}"))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
-    if size <= 32 || size > 128 * 1024 * 1024 {
+    let asset=!format.is_empty();
+    if size == 0 || size > if asset {96*1024} else {128*1024*1024} {
         return Err("请选择 128 MiB 以内的音频".into());
     }
+    if !asset {
     let mut header = [0u8; 65536];
     let n = file.read(&mut header).map_err(|e| e.to_string())?;
     let sbc = noirmusic_format::Header::parse(&header[..n]);
@@ -422,15 +463,17 @@ pub async fn start(path: String, song: Value, temporary: bool) -> Result<(), Str
         return Err("文件不是有效 MP3".into());
     }
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    format=if sbc.is_some() {"nsbc1"} else {"mp3"}.into();
+    }
     state::with(|s| {
         s.active = true;
         s.sent = 0;
         s.total = size;
-        s.status = "正在准备导入".into();
+        s.status = if asset { "正在导入封面与歌词" } else { "正在准备导入" }.into();
         s.speed = 0;
     });
     let args = serde_json::to_vec(
-        &json!({"size":size,"song":song,"format":if sbc.is_some() {"nsbc1"} else {"mp3"}}),
+        &json!({"size":size,"song":song,"format":format}),
     )
     .map_err(|e| e.to_string())?;
     link(|l| {
@@ -444,16 +487,22 @@ pub async fn start(path: String, song: Value, temporary: bool) -> Result<(), Str
             started: Instant::now(),
             chunk_len: 0,
             cancel_requested: false,
+            asset: if format=="cover1" {1} else if asset {2} else {0},
         })
     });
     send_command(3, args).await
 }
 fn crc32(mut crc: u32, bytes: &[u8]) -> u32 {
+    const NIBBLES: [u32;16] = [
+        0x00000000,0x1db71064,0x3b6e20c8,0x26d930ac,
+        0x76dc4190,0x6b6b51f4,0x4db26158,0x5005713c,
+        0xedb88320,0xf00f9344,0xd6d6a3e8,0xcb61b38c,
+        0x9b64c2b0,0x86d3d2d4,0xa00ae278,0xbdbdf21c,
+    ];
     for b in bytes {
         crc ^= *b as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320u32.wrapping_mul(crc & 1));
-        }
+        crc = (crc >> 4) ^ NIBBLES[(crc & 15) as usize];
+        crc = (crc >> 4) ^ NIBBLES[(crc & 15) as usize];
     }
     crc
 }
@@ -497,8 +546,13 @@ fn cleanup_upload() {
 fn fail(e: String) {
     link(|l| l.pending = None);
     cleanup_upload();
+    cleanup_assets();
     state::error(e);
     ui::rerender();
+}
+fn cleanup_assets() {
+    let assets=link(|l|std::mem::take(&mut l.assets));
+    for (path,_,_) in assets { let _=fs::remove_file(path); }
 }
 pub async fn cancel() -> Result<(), String> {
     if link(|l| l.command == 5 && l.pending.is_some()) {
@@ -517,4 +571,21 @@ pub async fn cancel() -> Result<(), String> {
         return Ok(());
     }
     send_command(6, vec![]).await
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn incremental_crc_matches_the_device_and_standard_vector() {
+        assert_eq!(!super::crc32(!0,b"123456789"),0xcbf43926);
+        let data=vec![0xa5;32777];
+        let mut expected=!0u32;
+        for b in &data {
+            expected^=u32::from(*b);
+            for _ in 0..8 { expected=(expected>>1)^(0xedb88320u32.wrapping_mul(expected&1)); }
+        }
+        let mut actual=!0;
+        for chunk in data.chunks(16384) { actual=super::crc32(actual,chunk); }
+        assert_eq!(actual,expected);
+    }
 }

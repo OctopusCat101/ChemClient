@@ -12,10 +12,11 @@ use std::{
 };
 
 pub const EXTREME: u32 = 24_000;
-pub const BALANCED: u32 = 64_000;
+pub const BALANCED: u32 = 48_000;
+pub const CLEAR: u32 = 80_000;
 pub fn profile(value: u32) -> u32 {
     match value {
-        0 | BALANCED => value,
+        0 | BALANCED | CLEAR => value,
         _ => EXTREME,
     }
 }
@@ -48,6 +49,12 @@ struct Job {
 thread_local! { static JOB: RefCell<Option<Job>> = const { RefCell::new(None) }; }
 
 pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
+    let assets=song.clone();
+    let result=begin(path,song,temporary,quality).await;
+    if result.is_err() { crate::attachments::cleanup(&assets); }
+    result
+}
+async fn begin(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
     let quality = profile(quality);
     let predecode = state::snapshot().predecode;
     if predecode && !state::snapshot().sbc_supported {
@@ -92,7 +99,7 @@ pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> 
     if path == output_path {
         return Err("压缩目标与原文件冲突".into());
     }
-    let channels = if quality == EXTREME { 1 } else { 2 };
+    let channels = 2;
     let encoder = Mp3Encoder::new(
         Mp3EncoderConfig::new()
             .sample_rate(24000)
@@ -250,6 +257,7 @@ pub fn cancel() -> bool {
     true
 }
 fn dispose(j: Job, remove_output: bool) {
+    if remove_output { crate::attachments::cleanup(&j.song); }
     timer::clear_timer(j.timer);
     let path = j.output_path.clone();
     let source = j.source_path.clone();
@@ -307,7 +315,8 @@ pub async fn tick() {
     match result {
         Ok(_) => {
             if predecode {
-                if let Err(e) = sbc::start(path.clone(), song, true) {
+                if let Err(e) = sbc::start(path.clone(), song.clone(), true) {
+                    crate::attachments::cleanup(&song);
                     let _ = fs::remove_file(path);
                     state::error(e);
                 }

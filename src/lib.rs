@@ -3,6 +3,7 @@ use exports::astrobox::psys_plugin_v4::{event, lifecycle};
 use std::io::Read;
 
 mod netease;
+mod attachments;
 mod protocol;
 mod sbc;
 mod state;

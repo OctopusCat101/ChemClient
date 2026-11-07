@@ -4,9 +4,10 @@ AstroBox API 4 / WASI 2 plugin for NoirMusic: local MP3, NetEase search, QR logi
 playlists, direct native-module import and library management. No watch quick-app
 is needed. The plugin uses the native NoirMusic library.
 
-Version 1.3.1 uses streaming anti-alias FIR resampling for both MP3 compression
-and optional SBC preconversion. Selected compression still runs first; memory
-usage stays bounded independently of song length.
+Version 1.4.0 adds optional local artwork/LRC and automatic NetEase artwork/lyrics.
+Artwork has one fixed 96x96 wearable resolution, independently of audio quality.
+MP3 compression and optional SBC preconversion use streaming anti-alias FIR
+resampling; selected compression runs first and memory stays bounded by windows.
 
 ## Build
 
@@ -60,8 +61,10 @@ dist/manifest.json and its declared resources are accessible as raw files.
 
 Direct importing currently targets Band 9 N66TC / 3.1.32. Building WASM and
 checking firmware addresses cannot confirm the real-device handshake. NetEase
-availability depends on the account and service. This release imports audio and
-metadata; cloud artwork/LRC transfer is not implemented. Existing lyrics work.
+availability depends on the account and service. This release imports audio, metadata, device-ready NCV1 covers and UTF-8 LRC or
+NetEase lyric JSON (including translations). Optional cloud attachment failures
+leave audio importing available. Media attachments require NoirMusic code66;
+SBC without attachments retains its earlier code59 minimum.
 
 ## Connecting and layout
 
@@ -78,13 +81,23 @@ in flight, including timer polls and retries. Send/registration failures are sho
 instead of silently leaving a pending request. No mutex is held across an await.
 
 After replacing a crashed API 3 release, completely exit/restart AstroBox, then
-install/reopen ChemClient 1.3.0. Reopening only the plugin does not recover the old
+install/reopen ChemClient 1.4.0. Reopening only the plugin does not recover the old
 panicked runtime.
+
+Version 1.4.1 polls transfer acknowledgements after 25 ms, backing off to 100 ms
+when the wearable is busy. It retains one bounded 16 KiB block in flight and
+the existing sequential-offset/CRC/atomic-commit guarantees. Nested protobuf
+packets are encoded into one buffer instead of several audio-sized copies.
+Actual speed still depends on the phone, BLE link and wearable flash.
+
+Local MP3 import automatically uses an embedded ID3v2.3/v2.4 cover when no image
+is selected. An explicitly selected cover takes priority. Artwork is converted
+on the phone to the same 96x96 device format; no full-song read is required.
 
 ## Compression and optional SBC predecode
 
 Local and NetEase imports share two independent settings. First select the MP3
-compression quality (Extreme, Balanced, or Original), then optionally enable SBC
+compression bitrate (24, 48, 80 kbps, or Original), then optionally enable SBC
 predecode. Compression always runs first; SBC conversion uses its output. Original
 skips MP3 compression and converts the source directly. Disabling predecode keeps
 the MP3 import workflow.
@@ -100,3 +113,22 @@ SBC reduces wearable computation at the cost of storage and transfer time:
 the default Joint Stereo / bitpool39 stream is about 251 kbps, or 5.65 MB for
 three minutes. A preceding 24 kbps compression still reduces source quality;
 converting it to SBC cannot restore that quality or retain its small file size.
+
+## Covers and lyrics
+
+Local import offers independent optional JPG/PNG and UTF-8 LRC selectors.
+NetEase imports request the song artwork and synchronized lyric/translation.
+The client derives Material dark-theme roles from the whole picture, crops a
+96x96 cover, adds black corners and emits opaque BGRA8888 in NCV1. This avoids
+image decoding, color analysis and image animations on the wearable. No image
+quality setting is tied to audio compression. Both app icons are100x100; the
+plugin icon uses the same100x100 Chem brand asset.
+
+Selected source images are bounded to8MiB,4096x4096 and32MiB decoder allocation;
+lyrics are limited to96KiB. Generated sidecars are removed after success/error/
+cancel without deleting user-selected originals. Audio and attachments upload
+sequentially with durable acknowledgements, so a full song is never in memory.
+
+Audio settings retain stereo at24kHz for all three compressed levels:24kbps
+(about0.18MB/min),48kbps (0.36MB/min),80kbps (0.60MB/min). Original skips MP3
+compression; optional SBC conversion always follows the chosen audio stage.

@@ -1,7 +1,7 @@
 //! Fluid Material 3 views built from API 4 native HTML primitives.
 use crate::{
     astrobox::psys_host_v4::{dialog, ui},
-    netease, state, transcode, transfer,
+    attachments, netease, state, transcode, transfer,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use qrcode::{QrCode, render::svg};
@@ -14,7 +14,7 @@ use std::{
 const INK: &str = "#E0E4E0";
 const PRIMARY: &str = "#A0D0BE";
 const MUTED: &str = "#BEC9C3";
-const SURFACE: &str = "#101512";
+const SURFACE: &str = "#000000";
 const CARD: &str = "#1C211F";
 fn text(s: &str, size: u32, color: &str) -> ui::Element {
     // URL/file-name tokens must break even on hosts without overflow-wrap.
@@ -63,10 +63,10 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
         .padding_bottom(12)
         .padding_left(20)
         .padding_right(20)
-        .radius(24)
+        .radius(28)
         .border(0, "transparent")
         .min_height(48)
-        .max_width(320)
+        .width_full()
         .min_width(0)
         .bg(if primary { PRIMARY } else { "#303633" })
         .text_color(if primary { "#00382A" } else { INK })
@@ -103,7 +103,7 @@ fn input(label: &str, value: &str, event: &str) -> ui::Element {
         .on(ui::Event::Input, event)
 }
 fn card() -> ui::Element {
-    column().padding(24).radius(12).bg(CARD)
+    column().padding(16).radius(16).bg(CARD)
 }
 fn image(src: &str, size: u32) -> ui::Element {
     // API3 hosts consume image content; src is also set for hosts supporting props.
@@ -437,6 +437,10 @@ fn build(s: &state::State) -> ui::Element {
                         input("输入歌曲名称", &s.local_name, "name")
                             .prop("key", &format!("name:{}", s.local_path)),
                     )
+                    .child(disabled(button(if s.cover_path.is_empty() { "添加封面 · 可选" } else { "更换封面" }, "pick-cover", false),s.active))
+                    .child(disabled(button(if s.lyric_path.is_empty() { "添加 LRC 歌词 · 可选" } else { "更换歌词" }, "pick-lyrics", false),s.active))
+                    .child(text(&format!("封面：{}\n歌词：{}",Path::new(&s.cover_path).file_name().and_then(|p|p.to_str()).unwrap_or("未选择"),Path::new(&s.lyric_path).file_name().and_then(|p|p.to_str()).unwrap_or("未选择")),13,MUTED))
+                    .child(disabled(button("清除附件","clear-attachments",false),s.active || (s.cover_path.is_empty() && s.lyric_path.is_empty())))
                     .child(disabled(
                         button("开始导入", "upload", true),
                         s.active || s.local_path.is_empty() || !s.direct,
@@ -447,17 +451,17 @@ fn build(s: &state::State) -> ui::Element {
     root.child(column().height(24).flex_grow(1.0))
 }
 fn compression_options(s: &state::State) -> ui::Element {
-    let mut choices = equal_row();
-    for (rate, label) in [(24000, "极省"), (64000, "均衡"), (0, "原文件")] {
-        choices = choices.child(equal(disabled(
-            button(label, &format!("quality:{rate}"), s.bitrate == rate),
+    let mut choices = column().gap(8);
+    for (rate, label) in [(24000, "极省 · 24 kbps · 0.18 MB/分钟"), (48000, "轻量 · 48 kbps · 0.36 MB/分钟"), (80000,"清晰 · 80 kbps · 0.60 MB/分钟"), (0, "原文件 · 不重新编码")] {
+        choices = choices.child(disabled(
+            button(&format!("{}{}", if s.bitrate==rate { "✓  " } else { "" }, label), &format!("quality:{rate}"), s.bitrate == rate),
             s.active,
-        )));
+        ).width_full().max_width(10000));
     }
     column()
         .child(text("压缩方式", 14, MUTED))
         .child(choices)
-        .child(text("极省：24k 单声道 · 均衡：64k 立体声", 13, MUTED))
+        .child(text("压缩档位均保留立体声，24 kHz 采样；极省适合人声，清晰保留更多细节。体积为 MP3 估算。", 13, MUTED))
         .child(disabled(
             button(
                 if s.predecode {
@@ -566,6 +570,14 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         return Err("正在传送音乐，请稍候".into());
     }
     match id {
+        "clear-attachments" => { state::with(|s| { s.cover_path.clear(); s.lyric_path.clear(); }); Ok(()) }
+        "pick-cover" | "pick-lyrics" => {
+            let cover = id == "pick-cover";
+            let picked = dialog::pick_file(dialog::PickConfig { read:false,copy_to:Some("media".into()) },
+                dialog::FilterConfig { multiple:false, extensions:if cover { vec!["jpg".into(),"jpeg".into(),"png".into()] } else { vec!["lrc".into()] },default_directory:String::new(),default_file_name:String::new() }).await.map_err(|e| e.to_string())?;
+            if !picked.name.is_empty() { state::with(|s| { let p=format!("media/{}",picked.name); if cover { s.cover_path=p; } else { s.lyric_path=p; } }); }
+            Ok(())
+        }
         "discover" | "connect" => transfer::discover_devices().await,
         "pick" => {
             let result = dialog::pick_file(
@@ -620,9 +632,12 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
+            if (!s.cover_path.is_empty() || !s.lyric_path.is_empty()) && !s.attachments_supported { return Err("请更新 NoirMusic 后重新连接，以导入封面与歌词".into()); }
+            let mut song=json!({"id":id,"name":s.local_name,"duration_ms":duration});
+            attachments::local(&mut song,&s.cover_path,&s.lyric_path,if s.attachments_supported { &s.local_path } else { "" })?;
             transcode::start(
                 s.local_path,
-                json!({"id":id,"name":s.local_name,"duration_ms":duration}),
+                song,
                 false,
                 s.bitrate,
             )
@@ -700,8 +715,9 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                 let song = s.results.get(i).ok_or("歌曲已失效，请重新搜索")?;
                 state::with(|s| s.status = "正在下载音乐到手机".into());
                 rerender();
-                let prepared = netease::prepare(song, &s.cookie, s.bitrate)?;
-                let meta = json!({"id":song.id,"name":song.name,"artists":song.artists.iter().map(|a|json!({"name":a})).collect::<Vec<_>>(),"album":{"id":song.album_id,"name":song.album},"duration_ms":song.duration_ms});
+                let prepared = netease::prepare(song, &s.cookie, if s.bitrate == 0 {320000} else {192000})?;
+                let mut meta = json!({"id":song.id,"name":song.name,"artists":song.artists.iter().map(|a|json!({"name":a})).collect::<Vec<_>>(),"album":{"id":song.album_id,"name":song.album},"duration_ms":song.duration_ms});
+                if s.attachments_supported { netease::prepare_attachments(song,&s.cookie,&mut meta); }
                 let path = prepared.path.clone();
                 let result = transcode::start(prepared.path, meta, true, s.bitrate).await;
                 if result.is_err() {

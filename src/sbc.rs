@@ -72,6 +72,7 @@ pub fn start(source: String, song: Value, temporary: bool) -> Result<(), String>
 }
 
 fn dispose(j: Job, remove_output: bool) {
+    if remove_output { crate::attachments::cleanup(&j.song); }
     timer::clear_timer(j.timer);
     let source = j.source.clone();
     let output = j.output.clone();

@@ -8,6 +8,7 @@ fn varint(mut n: u64, out: &mut Vec<u8>) {
     }
     out.push(n as u8);
 }
+#[cfg(test)]
 fn field(tag: u8, data: &[u8], out: &mut Vec<u8>) {
     out.push(tag);
     varint(data.len() as u64, out);
@@ -22,19 +23,29 @@ pub fn frame(request: u32, op: u8, args: &[u8]) -> Vec<u8> {
     v
 }
 pub fn encode(data: &[u8]) -> Vec<u8> {
-    let mut info = Vec::new();
-    field(10, PACKAGE.as_bytes(), &mut info);
-    field(18, &[], &mut info);
-    let mut message = Vec::new();
-    field(10, &info, &mut message);
-    field(18, data, &mut message);
-    let mut third = Vec::new();
-    field(74, &message, &mut third);
-    let mut packet = vec![8, 20, 16, 8];
-    packet.push(178);
-    packet.push(1);
-    varint(third.len() as u64, &mut packet);
-    packet.extend_from_slice(&third);
+    fn field_size(n: usize) -> usize {
+        let mut value = n;
+        let mut prefix = 1;
+        while value >= 128 { prefix += 1; value >>= 7; }
+        1 + prefix + n
+    }
+    let info_size = field_size(PACKAGE.len()) + 2;
+    let message_size = field_size(info_size) + field_size(data.len());
+    let third_size = field_size(message_size);
+    // Encode the nested envelope directly: no audio-sized intermediate Vecs.
+    let mut packet = Vec::with_capacity(5 + field_size(third_size));
+    packet.extend_from_slice(&[8, 20, 16, 8, 178, 1]);
+    varint(third_size as u64, &mut packet);
+    packet.push(74);
+    varint(message_size as u64, &mut packet);
+    packet.push(10);
+    varint(info_size as u64, &mut packet);
+    packet.push(10);
+    varint(PACKAGE.len() as u64, &mut packet);
+    packet.extend_from_slice(PACKAGE.as_bytes());
+    packet.extend_from_slice(&[18, 0, 18]);
+    varint(data.len() as u64, &mut packet);
+    packet.extend_from_slice(data);
     packet
 }
 fn take_varint(b: &[u8], i: &mut usize) -> Option<u64> {
@@ -102,6 +113,19 @@ pub fn decode(packet: &[u8]) -> Option<(u32, i32, serde_json::Value)> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_encoding_matches_the_nested_wire_format_at_length_boundaries() {
+        use super::*;
+        for size in [0,1,127,128,16383,16384,16397] {
+            let data=vec![0xa5;size];
+            let mut info=Vec::new(); field(10,PACKAGE.as_bytes(),&mut info); field(18,&[],&mut info);
+            let mut message=Vec::new(); field(10,&info,&mut message); field(18,&data,&mut message);
+            let mut third=Vec::new(); field(74,&message,&mut third);
+            let mut expected=vec![8,20,16,8,178,1];
+            varint(third.len() as u64,&mut expected); expected.extend_from_slice(&third);
+            assert_eq!(encode(&data),expected,"payload size {size}");
+        }
+    }
     use super::*;
     #[test]
     fn wire_and_bounds() {

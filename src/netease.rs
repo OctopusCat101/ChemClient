@@ -409,6 +409,40 @@ pub fn prepare(
 fn perform(request: ApiRequest) -> Result<Vec<u8>, String> {
     perform_response(request).map(|response| response.body)
 }
+/// Optional cloud assets never prevent importing an otherwise playable song.
+pub fn prepare_attachments(song: &CloudSong, cookie: &str, metadata: &mut Value) {
+    use crate::attachments;
+    let _ = fs::create_dir_all("media/attachments");
+    // Search results often omit picUrl. Fetch details before giving up artwork.
+    let mut cover_url=song.cover_url.clone();
+    if cover_url.is_empty() {
+        if let Ok(bytes)=perform(eapi("/api/v3/song/detail",
+            json!({"c":format!("[{{\"id\":{}}}]",song.id)}),cookie)) {
+            if let Ok(detail)=serde_json::from_slice::<Value>(&bytes) {
+                cover_url=detail_cover(&detail).into();
+            }
+        }
+    }
+    if !cover_url.is_empty() {
+        let source=PathBuf::from(format!("media/attachments/{}.jpg",song.id));
+        let separator=if cover_url.contains('?') { '&' } else { '?' };
+        if download(&format!("{cover_url}{separator}param=256y256"),&source,512*1024).is_ok() {
+            if let Ok(path)=attachments::cover(&source.to_string_lossy(),song.id) { attachments::add(metadata,path,"cover1"); }
+        }
+        let _ = fs::remove_file(source);
+    }
+    if let Ok(bytes)=perform(eapi("/api/song/lyric",json!({"id":song.id,"lv":-1,"kv":-1,"tv":-1}),cookie)) {
+        if bytes.len()<=96*1024 && serde_json::from_slice::<Value>(&bytes).is_ok_and(|v|v["lrc"]["lyric"].as_str().is_some_and(|s|!s.is_empty())) {
+            let path=format!("media/attachments/{}.json",song.id);
+            if fs::write(&path,bytes).is_ok() { attachments::add(metadata,path,"lyric_json"); }
+        }
+    }
+}
+
+fn detail_cover(detail: &Value) -> &str {
+    detail["songs"][0]["al"]["picUrl"].as_str().filter(|s|!s.is_empty())
+        .or_else(||detail["songs"][0]["album"]["picUrl"].as_str()).unwrap_or("")
+}
 
 fn perform_response(request: ApiRequest) -> Result<ApiResponse, String> {
     let client = Client::new();
@@ -681,6 +715,14 @@ fn url_encode(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detail_lookup_supports_both_album_shapes() {
+        use serde_json::json;
+        assert_eq!(super::detail_cover(&json!({"songs":[{"al":{"picUrl":"https://p1.music.126.net/a.jpg"}}]})),"https://p1.music.126.net/a.jpg");
+        assert_eq!(super::detail_cover(&json!({"songs":[{"album":{"picUrl":"https://p1.music.126.net/b.jpg"}}]})),"https://p1.music.126.net/b.jpg");
+        assert_eq!(super::detail_cover(&json!({"songs":[]})),"");
+    }
+
     use super::*;
 
     #[test]
