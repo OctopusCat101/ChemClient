@@ -61,6 +61,7 @@ pub struct State {
     pub cover_path: String,
     pub lyric_path: String,
     pub attachments_supported: bool,
+    pub cover_side: u32,
     pub library: Vec<Value>,
     pub active: bool,
     pub sent: u64,

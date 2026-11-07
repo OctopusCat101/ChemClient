@@ -4,7 +4,8 @@ use material_colors::{color::Argb, quantize::{Quantizer, QuantizerCelebi}, score
 use serde_json::{Value, json};
 use std::{fs, io::{Read, Seek, SeekFrom}};
 
-pub const SIDE: u32 = 96;
+pub const SIDE: u32 = 160;
+pub const COVER_BYTES: u64 = 16 + (SIDE * SIDE * 4) as u64;
 pub fn cover(path: &str, id: u64) -> Result<String, String> {
     if fs::metadata(path).map_err(|e| e.to_string())?.len() > 8 * 1024 * 1024 {
         return Err("封面请选择 8 MiB 以内的 JPG/PNG".into());
@@ -38,9 +39,10 @@ fn encode(decoded: &image::DynamicImage) -> Vec<u8> {
     }
     output.extend_from_slice(&SIDE.to_le_bytes());
     for (x,y,p) in rgba.enumerate_pixels() { // Firmware format16 is BGRA8888, matching the committed launcher assets.
-        let dx=if x<12 {12-x} else {x.saturating_sub(SIDE-13)};
-        let dy=if y<12 {12-y} else {y.saturating_sub(SIDE-13)};
-        let a=if dx*dx+dy*dy>144 {0} else {u16::from(p[3])};
+        let radius=SIDE/8;
+        let dx=if x<radius {radius-x} else {x.saturating_sub(SIDE-radius-1)};
+        let dy=if y<radius {radius-y} else {y.saturating_sub(SIDE-radius-1)};
+        let a=if dx*dx+dy*dy>radius*radius {0} else {u16::from(p[3])};
         output.extend_from_slice(&[(u16::from(p[2])*a/255) as u8,(u16::from(p[1])*a/255) as u8,(u16::from(p[0])*a/255) as u8,255]);
     }
     output
@@ -148,7 +150,7 @@ mod tests {
             fs::write(&source,file).unwrap();
             let path=embedded_cover(source.to_str().unwrap(),id).unwrap();
             let bytes=fs::read(&path).unwrap();
-            assert_eq!(bytes.len(),36880); assert_eq!(&bytes[..4],b"NCV1");
+            assert_eq!(bytes.len() as u64,COVER_BYTES); assert_eq!(&bytes[..4],b"NCV1");
             fs::remove_file(path).unwrap();
         }
         fs::write(&source,b"ID3\x04\0\0\x7f\x7f\x7f\x7f").unwrap();
@@ -159,12 +161,12 @@ mod tests {
     fn native_cover_has_bgra_pixels_opaque_black_corners_and_distinct_roles() {
         let source=image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(200,100,image::Rgba([255,0,0,255])));
         let bytes=encode(&source);
-        assert_eq!(bytes.len(),36880);
+        assert_eq!(bytes.len(),102416);
         assert_eq!(&bytes[..4],b"NCV1");
-        assert_eq!(&bytes[12..16],&96u32.to_le_bytes());
+        assert_eq!(&bytes[12..16],&160u32.to_le_bytes());
         assert_ne!(&bytes[4..6],&bytes[6..8]);
         assert_eq!(&bytes[16..20],&[0,0,0,255]);
-        let pixel=16+(48*96+48)*4;
+        let pixel=16+(80*160+80)*4;
         assert_eq!(&bytes[pixel..pixel+4],&[0,0,255,255]);
     }
     #[test]
@@ -173,5 +175,13 @@ mod tests {
         let bytes=encode(&source);
         assert_ne!(&bytes[4..6],&bytes[6..8]);
         assert!(bytes[16..].chunks_exact(4).all(|p|p==[0,0,0,255]));
+    }
+    #[test]
+    fn native_cover_preserves_real_160_pixel_detail() {
+        let source=image::RgbaImage::from_fn(160,160,|x,_| image::Rgba([if x%2==0 {255} else {0},0,0,255]));
+        let bytes=encode(&image::DynamicImage::ImageRgba8(source));
+        for x in 0..160 { let i=16+(80*160+x)*4;
+            assert_eq!(&bytes[i..i+4],&[0,0,if x%2==0 {255} else {0},255]);
+        }
     }
 }

@@ -303,6 +303,7 @@ pub async fn received(payload: &str) {
                     s.direct = true;
                     s.sbc_supported = value["sbc_predecode"] == true;
                     s.attachments_supported = value["media_assets"] == 1;
+                    s.cover_side = value["cover_side"].as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32;
                     s.status = "已直连 · 无需打开手环快应用".into();
                 });
                 Ok(())
@@ -427,6 +428,10 @@ pub async fn start(path: String, mut song: Value, temporary: bool) -> Result<(),
     let assets=song.as_object_mut().and_then(|s|s.remove("_attachments")).unwrap_or(Value::Null);
     if let Some(assets)=assets.as_array() {
         if !assets.is_empty() && !state::snapshot().attachments_supported { return Err("手环版本不支持封面与歌词".into()); }
+        if assets.iter().any(|a|a["format"]=="cover1") && state::snapshot().cover_side<crate::attachments::SIDE {
+            crate::attachments::cleanup(&json!({"_attachments":assets}));
+            return Err("160px 封面需要先更新 NoirMusic 至 0.4.50 或更新版本".into());
+        }
         link(|l|for item in assets {
             if let (Some(path),Some(format))=(item["path"].as_str(),item["format"].as_str()) {
                 l.assets.push_back((path.into(),song.clone(),format.into()));
@@ -441,8 +446,9 @@ async fn begin_upload(path:String,song:Value,temporary:bool, mut format:String) 
     let mut file = File::open(&path).map_err(|e| format!("打开文件失败：{e}"))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let asset=!format.is_empty();
-    if size == 0 || size > if asset {96*1024} else {128*1024*1024} {
-        return Err("请选择 128 MiB 以内的音频".into());
+    let limit=if format=="cover1" {crate::attachments::COVER_BYTES} else if asset {96*1024} else {128*1024*1024};
+    if size == 0 || size > limit {
+        return Err(if asset {"封面或歌词大小无效"} else {"请选择 128 MiB 以内的音频"}.into());
     }
     if !asset {
     let mut header = [0u8; 65536];

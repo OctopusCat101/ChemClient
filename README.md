@@ -4,8 +4,10 @@ AstroBox API 4 / WASI 2 plugin for NoirMusic: local MP3, NetEase search, QR logi
 playlists, direct native-module import and library management. No watch quick-app
 is needed. The plugin uses the native NoirMusic library.
 
-Version 1.4.0 adds optional local artwork/LRC and automatic NetEase artwork/lyrics.
-Artwork has one fixed 96x96 wearable resolution, independently of audio quality.
+Optional local artwork/LRC and automatic NetEase artwork/lyrics are supported.
+Version 1.4.3 generates real 160x160 wearable artwork, independently of audio
+quality. Importing covers requires NoirMusic 0.4.50 / code82 or later.
+Only 160x160 covers are supported; previously imported 96x96 covers must be reimported.
 MP3 compression and optional SBC preconversion use streaming anti-alias FIR
 resampling; selected compression runs first and memory stays bounded by windows.
 
@@ -63,8 +65,8 @@ Direct importing currently targets Band 9 N66TC / 3.1.32. Building WASM and
 checking firmware addresses cannot confirm the real-device handshake. NetEase
 availability depends on the account and service. This release imports audio, metadata, device-ready NCV1 covers and UTF-8 LRC or
 NetEase lyric JSON (including translations). Optional cloud attachment failures
-leave audio importing available. Media attachments require NoirMusic code66;
-SBC without attachments retains its earlier code59 minimum.
+leave audio importing available. Lyrics require NoirMusic code66; 160x160 covers
+require code82. SBC without attachments retains its earlier code59 minimum.
 
 ## Connecting and layout
 

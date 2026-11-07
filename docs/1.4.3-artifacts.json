@@ -1,0 +1,21 @@
+{
+  "version": "1.4.3",
+  "hardware_validated": false,
+  "artifacts": [
+    {
+      "path": "D:/ChemClient/dist/ChemClient.abp",
+      "bytes": 497634,
+      "sha256": "6973c06f7f0c1f6a286edda8e024dde037d3d5ab994aa7a1d056919cd119a195"
+    },
+    {
+      "path": "D:/ChemClient/dist/chemclient.wasm",
+      "bytes": 1361592,
+      "sha256": "d98912c5130e6c1d0adf66437baf540a5098de2f3e94f172fa6ed419a6fe8ee5"
+    },
+    {
+      "path": "D:/ChemClient/dist/manifest.json",
+      "bytes": 470,
+      "sha256": "2cc10ecef78cbdc03cfc622c105ea20029f22198e384c9f4e6783ce7365b05a8"
+    }
+  ]
+}
