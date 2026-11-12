@@ -86,8 +86,8 @@ fn equal(el: ui::Element) -> ui::Element {
     el.width(0).min_width(0).flex_grow(1.0)
 }
 fn button(label: &str, event: &str, primary: bool) -> ui::Element {
-    let el = ui::Element::new(ui::ElementType::Button, Some(label))
-        .without_default_styles()
+    let el = stable_node(ui::ElementType::Button, Some(label), &format!("button:{event}"))
+        .animation("none").transition("none").transform("none")
         .padding_top(12)
         .padding_bottom(12)
         .padding_left(20)
@@ -111,20 +111,22 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
             && !event.starts_with("quality:"),
     )
 }
-fn module_switch(module: &modules::Module, busy: bool) -> ui::Element {
-    let enabled=module.intent==1;
-    let key=format!("switch:{}",module.id);
-    let track=fixed_box(stable_node(ui::ElementType::Button,None,&key),52,32)
+fn toggle_switch(key: &str, label: &str, event: &str, enabled: bool, busy: bool) -> ui::Element {
+    let track=fixed_box(stable_node(ui::ElementType::Button,None,key),52,32)
         .padding(0).radius(16).border(0,"transparent").relative()
         .flex().flex_direction(ui::FlexDirection::Row).align_center()
         .bg(if enabled {PRIMARY}else{"#59625D"})
-        .prop("role","switch").prop("aria-label",&format!("启用 {}",module.name()))
+        .prop("role","switch").prop("aria-label",label)
         .prop("aria-checked",if enabled {"true"}else{"false"})
-        .on(ui::Event::Click,&format!("module-toggle:{}",module.id));
+        .on(ui::Event::Click,event);
     let knob=fixed_box(stable_node(ui::ElementType::Div,None,&format!("{key}:knob")),24,24)
         .radius(12).absolute().top(4).left(if enabled {24}else{4})
         .bg(if enabled {"#00382A"}else{INK});
-    disabled(track.child(knob),busy||module.intent==2)
+    disabled(track.child(knob),busy)
+}
+fn module_switch(module: &modules::Module, busy: bool) -> ui::Element {
+    toggle_switch(&format!("switch:{}",module.id), &format!("启用 {}",module.name()),
+        &format!("module-toggle:{}",module.id), module.intent==1, busy||module.intent==2)
 }
 fn input(label: &str, value: &str, event: &str) -> ui::Element {
     ui::Element::new(ui::ElementType::Input, None)
@@ -390,8 +392,13 @@ fn build(s: &state::State) -> ui::Element {
                 .child(disabled(button("导入 .chem","module-import",true).width(128),!s.manager_ready||!s.native_delivery||s.manager_busy||s.installing||s.active||s.download.is_some()||s.connection.busy())));
             if s.manager_ready && s.boot_status & 1 != 0 {
                 let enabled = s.boot_status & 2 != 0;
-                root = root.child(row().child(equal(text("自动启动", 16, INK)))
-                    .child(disabled(button(if enabled { "已开启" } else { "已关闭" }, "boot-toggle", enabled).width(80), module_busy(s))));
+                root = root.child(stable_node(ui::ElementType::Div,None,"boot-panel")
+                    .flex().flex_direction(ui::FlexDirection::Row).align_center().gap(12)
+                    .padding_left(16).padding_right(16).padding_top(8).padding_bottom(8)
+                    .min_height(48).radius(16).bg(CARD)
+                    .child(equal(text("自动启动", 16, INK)))
+                    .child(toggle_switch("boot-switch", "自动启动", "boot-toggle", enabled,
+                        module_busy(s)||state::action_busy())));
             }
             if s.manager_ready && s.safe_mode {
                 root = root.child(text(if s.safe_exit_pending { "恢复设置已保存，请重启手环" } else { "安全模式 · 已暂停模块自动启动" }, 16, INK));

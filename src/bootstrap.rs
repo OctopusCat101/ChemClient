@@ -147,23 +147,12 @@ pub async fn start(addr: &str) -> Result<(), String> {
         s.firmware_sha256.clear();
     });
     ui::rerender();
-    // Connect using the bundled target immediately. A cloud catalog refresh
-    // must not delay or restart a working resident-service handshake.
-    prepare(addr, cloud::bundled()?).await?;
-    let _ = cloud_download::catalog(addr);
-    Ok(())
+    cloud_download::catalog(addr)
 }
 pub async fn catalog_ready(addr: &str, result: Result<cloud::Catalog, String>) -> Result<(), String> {
     if state::snapshot().addr != addr { return Ok(()); }
-    match result {
-        Ok(catalog) => {
-            let target = state::snapshot().target;
-            if let Some(t) = catalog.targets.iter().find(|t| t.target == target) {
-                state::with(|s| { s.cloud_modules = t.modules.clone(); s.cloud_notice.clear(); });
-            }
-        }
-        Err(_) => {} // Bundled compatible modules remain available offline.
-    }
+    let catalog = result.map_err(|e| format!("获取云端清单失败，请刷新重试：{e}"))?;
+    prepare(addr, catalog).await?;
     ui::rerender();
     Ok(())
 }
@@ -370,7 +359,7 @@ mod tests {
     use super::*;
     #[test]
     fn installer_inspection_waits_for_a_failed_service_probe() {
-        let mut w = Waiting { addr: "band".into(), target: cloud::bundled().unwrap().targets.remove(0),
+        let mut w = Waiting { addr: "band".into(), target: cloud::fixture().unwrap().targets.remove(0),
             queued: false, since: Instant::now(), inspect: false, inspected: false };
         assert!(!w.inspect);
         assert!(w.probe_failed());
@@ -404,7 +393,7 @@ mod tests {
     }
     #[test]
     fn exact_device_and_firmware_gate_cloud_loader() {
-        let c = cloud::bundled().unwrap();
+        let c = cloud::fixture().unwrap();
         assert!(identify(&packet("3.1.35", "n66tc"), &c).is_ok());
         assert!(identify(&packet("3.1.35", "miwear.watch.n66tc"), &c).is_ok());
         assert!(identify(&packet("3.1.35", "M2346B1"), &c).is_ok());
@@ -421,7 +410,7 @@ mod tests {
         // Wire fixture from the System/DeviceInfo schema: command 2/2,
         // firmware field 2 and model field 4, with field 5 entirely absent.
         let reply = b"\x08\x02\x10\x02\x22\x1e\x1a\x1c\x12\x063.1.35\x22\x12miwear.watch.n66tc";
-        let c = cloud::bundled().unwrap();
+        let c = cloud::fixture().unwrap();
         let target = identify(reply, &c).unwrap();
         assert_eq!(target.target, "xiaomi-band-9-3.1.35");
         assert_eq!(target.firmware, "3.1.35");
@@ -433,13 +422,13 @@ mod tests {
         // Exact firmware C38CAB8 selects this model for factory.board.id=TC;
         // C38D668 puts the selected string in System.DeviceInfo.model (4).
         let reply = b"\x08\x02\x10\x02\x22\x13\x1a\x11\x12\x063.1.35\x22\x07M2346B1";
-        let target = identify(reply, &cloud::bundled().unwrap()).unwrap();
+        let target = identify(reply, &cloud::fixture().unwrap()).unwrap();
         assert_eq!(target.target, "xiaomi-band-9-3.1.35");
     }
 
     #[test]
     fn incomplete_identity_is_rejected_with_the_missing_field_named() {
-        let c = cloud::bundled().unwrap();
+        let c = cloud::fixture().unwrap();
         assert!(identify(&packet("", "n66tc"), &c).unwrap_err().contains("固件版本"));
         assert!(identify(&packet("3.1.35", ""), &c).unwrap_err().contains("型号"));
         // Unknown fields cannot override an unsupported model.

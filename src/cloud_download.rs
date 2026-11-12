@@ -46,7 +46,13 @@ fn begin(addr: &str, destination: Destination, artifact: Option<&cloud::Artifact
     let base = cloud::base()?;
     if base.is_empty() { return Err("云端仓库尚未配置".into()); }
     let path = artifact.map(|a| a.path.as_str()).unwrap_or("index.json");
-    let http = Http::start(&format!("{base}/{path}"))?;
+    let mut url = format!("{base}/{path}");
+    if artifact.is_none() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "系统时间无效，无法刷新云端清单")?.as_millis();
+        url.push_str(&format!("?refresh={now}"));
+    }
+    let http = Http::start(&url)?;
     let owner = match &destination {
         Destination::Catalog => Owner::Catalog,
         Destination::Loader => Owner::Loader,

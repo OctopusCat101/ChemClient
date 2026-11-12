@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn current_release_matches_the_client_signing_key() {
         if let Ok(path) = std::env::var("CHEM_TEST_PACKAGE") {
-            let catalog = crate::cloud::bundled().unwrap();
+            let catalog = crate::cloud::fixture().unwrap();
             let target = &catalog.targets[0];
             let p = Package::open(&path, &target.target, &target.firmware_sha256).unwrap();
             assert_eq!(p.manifest.id, "bluetooth_audio");

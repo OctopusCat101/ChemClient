@@ -120,9 +120,10 @@ fn artifact(a: &Artifact, max: u64, prefix: &str, extension: &str) -> Result<(),
     }
     Ok(())
 }
-pub fn bundled() -> Result<Catalog, String> {
+#[cfg(test)]
+pub fn fixture() -> Result<Catalog, String> {
     let c: Catalog =
-        serde_json::from_str(include_str!("../assets/catalog.json")).map_err(|e| e.to_string())?;
+        serde_json::from_str(include_str!("../tests/fixtures/catalog.json")).map_err(|e| e.to_string())?;
     validate(&c)?;
     Ok(c)
 }
@@ -132,7 +133,7 @@ mod tests {
     use super::*;
     #[test]
     fn catalog_checks_paths_hashes_and_unique_targets() {
-        let catalog = bundled().unwrap();
+        let catalog = fixture().unwrap();
         assert!(validate(&catalog).is_ok());
         for path in [
             "../module.chem",
