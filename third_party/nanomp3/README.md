@@ -1,4 +1,4 @@
-# nanomp3 (Canopus vendored copy)
+# nanomp3 (Chem vendored copy)
 
 Upstream: <https://github.com/robbie01/nanomp3> 0.1.1  
 License: MIT OR Apache-2.0

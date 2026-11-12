@@ -18,7 +18,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <stddef.h>
-#ifdef CANOPUS_FREESTANDING
+#ifdef CHEM_FREESTANDING
 typedef int32_t ssize_t;
 #else
 #include <sys/types.h>
@@ -71,7 +71,7 @@ struct sbc_struct {
 
 typedef struct sbc_struct sbc_t;
 
-/* Canopus: caller-owned storage avoids libc allocation in a resident module. */
+/* Chem: caller-owned storage avoids libc allocation in a resident module. */
 size_t sbc_get_private_size(void);
 int sbc_init_static(sbc_t *sbc, void *storage, size_t storage_len,
                     unsigned long flags);

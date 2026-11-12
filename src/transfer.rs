@@ -1,6 +1,6 @@
 use crate::{
-    astrobox::psys_host_v4::{device, register, timer, transport},
-    protocol, state, ui,
+    astrobox::psys_host_v4::{register, timer, transport},
+    connection, protocol, state, ui,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -41,7 +41,7 @@ struct Link {
     command: u8,
     list_offset: u32,
     timer_id: u64,
-    registered_addr: String,
+    registered_addrs: Vec<String>,
     last_progress_render: Option<Instant>,
     assets: VecDeque<(String, Value, String)>,
     completed_assets: u8,
@@ -63,40 +63,16 @@ fn link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
         .unwrap_or_else(|e| e.into_inner()))
 }
 
-pub async fn discover_devices() -> Result<(), String> {
-    if state::snapshot().discovering {
-        return Ok(());
-    }
-    if state::snapshot().active {
-        return Err("请先完成或取消导入".into());
-    }
+pub fn reset_connection() {
+    // Called only while idle. Keep subscriptions/timer, but ignore old replies.
+    link(|l| { l.pending = None; l.list_offset = 0; });
     state::with(|s| {
-        s.discovering = true;
-        s.status = "正在读取 AstroBox 设备".into();
+        s.direct = false;
+        s.sbc_supported = false;
+        s.attachments_supported = false;
+        s.cover_side = 0;
+        s.library.clear();
     });
-    ui::rerender();
-    // Connected devices come from the host runtime directly. Historical devices
-    // require a frontend round trip and must not delay the usable device list.
-    let connected = device::get_connected_device_list().await;
-    let addresses: Vec<String> = connected.iter().map(|d| d.addr.clone()).collect();
-    let devices: Vec<(String, String)> = connected.into_iter().map(|d| (d.addr, d.name)).collect();
-    state::with(|s| {
-        s.devices = devices;
-        s.connected_devices = addresses;
-        s.discovering = false;
-        s.discovered = true;
-        if !s.connected_devices.iter().any(|a| a == &s.addr) {
-            s.direct = false;
-        }
-        s.status = if s.direct {
-            "音乐连接已就绪".into()
-        } else if s.devices.is_empty() {
-            "没有已连接的设备，请先在 AstroBox 的设备页连接手环，再刷新".into()
-        } else {
-            "点击已连接的手环，建立音乐连接".into()
-        };
-    });
-    Ok(())
 }
 
 pub async fn connect_device(addr: &str) -> Result<(), String> {
@@ -110,10 +86,6 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
     {
         return Err("请先在 AstroBox 设备页连接这只手环，然后刷新设备".into());
     }
-    let registered = link(|l| l.registered_addr.clone());
-    if !registered.is_empty() && registered != addr {
-        return Err("切换手环前请重新加载 ChemClient，以清除旧设备消息订阅".into());
-    }
     state::with(|s| {
         s.addr = addr.into();
         s.device_name = s
@@ -123,16 +95,19 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
             .map(|d| d.1.clone())
             .unwrap_or_default();
         s.direct = false;
-        s.status = "正在连接 NoirMusic…".into();
     });
     ui::rerender();
     let addr = state::snapshot().addr;
     if addr.is_empty() {
         return Err("请先在 AstroBox 连接手环".into());
     }
-    if registered.is_empty() {
+    ensure_receiver(&addr).await?;
+    send_command(1, vec![]).await
+}
+pub async fn ensure_receiver(addr: &str) -> Result<(), String> {
+    if !link(|l| l.registered_addrs.iter().any(|a| a == addr)) {
         register::register_transport_recv(
-            addr.clone(),
+            addr.to_owned(),
             register::TransportRecvFiler {
                 xiaomi_vela_v5_channel_id: 0,
                 xiaomi_vela_v5_protobuf_typeid: 20,
@@ -140,14 +115,14 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
         )
         .await
         .map_err(|e| format!("注册消息接收失败：{e}"))?;
-        link(|l| l.registered_addr = addr.clone());
+        link(|l| l.registered_addrs.push(addr.to_owned()));
     }
     let has_timer = link(|l| l.timer_id != 0);
     if !has_timer {
         let id = timer::set_interval(25, "music-link");
         link(|l| l.timer_id = id);
     }
-    send_command(1, vec![]).await
+    Ok(())
 }
 pub async fn send_command(op: u8, args: Vec<u8>) -> Result<(), String> {
     let addr = state::with(|s| s.addr.clone());
@@ -304,7 +279,7 @@ pub async fn received(payload: &str) {
                     s.sbc_supported = value["sbc_predecode"] == true;
                     s.attachments_supported = value["media_assets"] == 1;
                     s.cover_side = value["cover_side"].as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32;
-                    s.status = "已直连 · 无需打开手环快应用".into();
+                    s.connection = connection::Phase::Ready;
                 });
                 Ok(())
             }
@@ -550,7 +525,12 @@ fn cleanup_upload() {
     }
 }
 fn fail(e: String) {
-    link(|l| l.pending = None);
+    let handshake = link(|l| { l.pending = None; l.command == 1 });
+    if handshake {
+        state::with(|s| s.direct = false);
+        connection::failed(format!("音乐服务连接失败：{e}"));
+        return;
+    }
     cleanup_upload();
     cleanup_assets();
     state::error(e);

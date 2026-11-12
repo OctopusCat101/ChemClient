@@ -7,36 +7,36 @@
 
 #include "sbc.h"
 
-#define CANOPUS_SBC_ALIGN 16u
-#define CANOPUS_SBC_PCM_FRAMES 128u
-#define CANOPUS_SBC_CHANNELS 2u
+#define CHEM_SBC_ALIGN 16u
+#define CHEM_SBC_PCM_FRAMES 128u
+#define CHEM_SBC_CHANNELS 2u
 
-struct canopus_sbc_encoder {
+struct chem_sbc_encoder {
     sbc_t sbc;
 };
 
-uint32_t canopus_sbc_encoder_size(void)
+uint32_t chem_sbc_encoder_size(void)
 {
-    return (uint32_t)(CANOPUS_SBC_ALIGN - 1u +
-                      sizeof(struct canopus_sbc_encoder) +
+    return (uint32_t)(CHEM_SBC_ALIGN - 1u +
+                      sizeof(struct chem_sbc_encoder) +
                       sbc_get_private_size());
 }
 
-void *canopus_sbc_encoder_init(void *memory, uint32_t memory_size,
+void *chem_sbc_encoder_init(void *memory, uint32_t memory_size,
                                uint8_t bitpool, uint8_t channel_mode)
 {
     uintptr_t base;
-    struct canopus_sbc_encoder *encoder;
+    struct chem_sbc_encoder *encoder;
     uint8_t *private_storage;
     size_t private_size = sbc_get_private_size();
 
-    if (memory == NULL || memory_size < canopus_sbc_encoder_size() ||
+    if (memory == NULL || memory_size < chem_sbc_encoder_size() ||
         bitpool < 2u || bitpool > 250u ||
         (channel_mode != SBC_MODE_STEREO && channel_mode != SBC_MODE_JOINT_STEREO))
         return NULL;
-    base = ((uintptr_t)memory + CANOPUS_SBC_ALIGN - 1u) &
-           ~((uintptr_t)CANOPUS_SBC_ALIGN - 1u);
-    encoder = (struct canopus_sbc_encoder *)base;
+    base = ((uintptr_t)memory + CHEM_SBC_ALIGN - 1u) &
+           ~((uintptr_t)CHEM_SBC_ALIGN - 1u);
+    encoder = (struct chem_sbc_encoder *)base;
     private_storage = (uint8_t *)(encoder + 1);
     if (sbc_init_static(&encoder->sbc, private_storage, private_size, 0) != 0)
         return NULL;
@@ -51,24 +51,24 @@ void *canopus_sbc_encoder_init(void *memory, uint32_t memory_size,
     return encoder;
 }
 
-int32_t canopus_sbc_encoder_encode(void *context, const int16_t *pcm,
+int32_t chem_sbc_encoder_encode(void *context, const int16_t *pcm,
                                    uint32_t pcm_frames, uint8_t *output,
                                    uint32_t output_capacity)
 {
-    struct canopus_sbc_encoder *encoder = context;
+    struct chem_sbc_encoder *encoder = context;
     ssize_t written = 0;
     ssize_t consumed;
 
     if (encoder == NULL || pcm == NULL || output == NULL ||
-        pcm_frames != CANOPUS_SBC_PCM_FRAMES)
+        pcm_frames != CHEM_SBC_PCM_FRAMES)
         return -22;
     consumed = sbc_encode(&encoder->sbc, pcm,
-                          CANOPUS_SBC_PCM_FRAMES * CANOPUS_SBC_CHANNELS *
+                          CHEM_SBC_PCM_FRAMES * CHEM_SBC_CHANNELS *
                               sizeof(int16_t),
                           output, output_capacity, &written);
     if (consumed < 0)
         return (int32_t)consumed;
-    if (consumed != (ssize_t)(CANOPUS_SBC_PCM_FRAMES * CANOPUS_SBC_CHANNELS *
+    if (consumed != (ssize_t)(CHEM_SBC_PCM_FRAMES * CHEM_SBC_CHANNELS *
                               sizeof(int16_t)) ||
         written <= 0 || written > (ssize_t)output_capacity)
         return -5;

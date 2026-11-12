@@ -2,6 +2,13 @@
 use exports::astrobox::psys_plugin_v4::{event, lifecycle};
 use std::io::Read;
 
+mod modules;
+mod connection;
+mod package;
+mod delivery;
+mod cloud;
+mod cloud_download;
+mod bootstrap;
 mod netease;
 mod attachments;
 mod protocol;
@@ -23,14 +30,14 @@ impl lifecycle::Guest for ChemClient {
         }
         state::with(|s| {
             s.cookie = cookie;
-            s.status = "启用手环上的 NoirMusic，再点连接".into();
         });
+        connection::refresh(false).await;
     }
 }
 impl event::Guest for ChemClient {
     async fn on_event(kind: event::EventType, payload: String) -> String {
         match kind {
-            event::EventType::TransportPacket => transfer::received(&payload).await,
+            event::EventType::TransportPacket => { modules::received(&payload).await; transfer::received(&payload).await; },
             event::EventType::Timer => {
                 // Host timers carry their identity and application payload.
                 // Compression ticks must not multiply pending BLE polls.
@@ -42,16 +49,16 @@ impl event::Guest for ChemClient {
                 match tag {
                     "music-compression" => transcode::tick().await,
                     "music-link" => transfer::tick().await,
+                    "chem-manager" => modules::tick().await,
+                    "chem-bootstrap" => bootstrap::tick().await,
+                    "chem-download" => cloud_download::tick().await,
                     _ => {}
                 }
+                connection::check_pending().await;
             }
             event::EventType::DeviceAction => {
-                if !state::snapshot().active {
-                    if let Err(error) = transfer::discover_devices().await {
-                        state::error(error);
-                    }
-                    ui::rerender();
-                }
+                cloud_download::cancel(true);
+                connection::refresh(false).await;
             }
             _ => {}
         }

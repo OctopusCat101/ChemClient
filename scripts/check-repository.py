@@ -7,14 +7,15 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 # The independently published client never contains a signing private key.
 RELEASE_KEY = None
+RETIRED_NAMESPACE = bytes.fromhex("63616e6f707573")
 PRIVATE_KEY = re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----')
 STALE_PATH = re.compile(
-    r'(?:crates/(?:bluetooth-audio-(?:core|device)|lyra-player-core)|'
-    r'cli[/]canopus[/]|tools[/]canopus-core[/]|watchfaces[/]canopus-installer)'
+    r'(?:crates/(?:bluetooth-audio-(?:core|device)|lyra-player-core)'
+    r')'
 )
 PERSONAL_PATH = re.compile(
-    r'(?:[CD]:[/\\](?:Users[/\\]angel|Canopus-main|Chaos-Module|LuaDevTemplate)|'
-    r'/[cd]/(?:Users/angel|Canopus-main|Chaos-Module|LuaDevTemplate))', re.I
+    r'(?:[CD]:[/\\](?:Users[/\\]angel|Chem-main|Chaos-Module|LuaDevTemplate)|'
+    r'/[cd]/(?:Users/angel|Chem-main|Chaos-Module|LuaDevTemplate))', re.I
 )
 
 
@@ -28,13 +29,16 @@ def main():
     for name in paths:
         path = ROOT / name
         parts = Path(name).parts
-        if (parts[0] in {'out', '.canopus-local', '_band9_pack'} and name != RELEASE_KEY) or path.name == 'build.local.toml':
+        if (parts[0] in {'out', '.chem-local', '_band9_pack'} and name != RELEASE_KEY) or path.name == 'build.local.toml':
             failures.append(name + ': local file is tracked')
         if name == '.cargo/config.toml' and (ROOT / 'scripts/configure.py').exists():
             failures.append(name + ': generated SDK configuration is tracked')
         if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
             continue
-        text = path.read_bytes().decode('utf-8', errors='replace')
+        raw = path.read_bytes()
+        if RETIRED_NAMESPACE in name.lower().encode() or RETIRED_NAMESPACE in raw.lower():
+            failures.append(name + ': retired project namespace')
+        text = raw.decode('utf-8', errors='replace')
         if PRIVATE_KEY.search(text) and name != RELEASE_KEY:
             failures.append(name + ': private-key content')
         # Evidence and attribution may name original projects, but executable

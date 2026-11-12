@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 #include <limits.h>
-#ifdef CANOPUS_FREESTANDING
+#ifdef CHEM_FREESTANDING
 #include <stddef.h>
 void *memcpy(void *restrict dst, const void *restrict src, size_t count);
 #else
@@ -245,7 +245,7 @@ static inline void sbc_analyze_1b_8s_simd_even(struct sbc_encoder_state *state,
 #include <arm_acle.h>
 
 /*
- * Canopus: Cortex-M DSP-extension variant of sbc_analyze_eight_simd().
+ * Chem: Cortex-M DSP-extension variant of sbc_analyze_eight_simd().
  *
  * The SIMD reference layout accumulates exactly two 16-bit products into
  * each t1[] lane, which is the operation performed by one SMLAD instruction.

@@ -13,7 +13,7 @@
 #include <config.h>
 #endif
 
-#ifdef CANOPUS_FREESTANDING
+#ifdef CHEM_FREESTANDING
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -911,7 +911,7 @@ static SBC_ALWAYS_INLINE ssize_t sbc_pack_frame_internal(uint8_t *data,
 	}
 
 	/*
-	 * Canopus: list the subbands that received bits once per frame, in the
+	 * Chem: list the subbands that received bits once per frame, in the
 	 * same channel/subband order, so the per-block quantizer visits only
 	 * those instead of re-testing and re-indexing every subband.
 	 */

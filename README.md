@@ -1,11 +1,83 @@
 # ChemClient
 
-AstroBox API 4 / WASI 2 plugin for NoirMusic: local MP3, NetEase search, QR login,
-playlists, direct native-module import and library management. No watch quick-app
-is needed. The plugin uses the native NoirMusic library.
+ChemClient 1.7.18 is the Chem module manager and NoirMusic importer for API 4 / WASI 2.
+Select an installed module to open its content uploader directly. The enable switch,
+Delete and available Update icons share one compact row beside the module.
+Normal rows show only the module name and controls. Delete uses a static trash
+icon and Update a static upward arrow; Refresh, Import and Install keep text labels.
+Icon buttons, images and switches have fixed min/max dimensions and explicitly
+disable animation, transition and transform. Module rows reuse host element IDs
+across refreshes. A fixed-width control strip always shows Update, disabled when no newer cloud
+version is available, so refresh does not move any controls. Icons have accessible labels
+and hover tooltips. Pending changes and failures still show a short status.
+Deletion uses a confirmation dialog; no management panel expands.
+NoirMusic provides local MP3, NetEase and library views in the black and pale-green
+interface. Local upload starts with file selection and one Import action;
+quality, cover and lyrics are grouped under the optional import settings.
+
+The independent `com.chem.manager` bridge currently supports Band 9 / 3.1.35.
+Run Chem once on the wearable. Loader build 0x26111205 processes management on
+the existing resident owner loop, including when LVGL screen refresh stops.
+Startup probes the resident service before inspecting or opening the installer;
+a working service does not require the Chem watchface to be current.
+Management replies use SDK ABI 2.0, matching outgoing requests.
+Automatic startup is off by default and requires explicit confirmation in the
+manager. Startup guards persist before module execution and observe stability
+for 60 seconds. Safe mode offers Retry, Disable all and Roll back updates;
+saved recovery changes take effect after reboot. Device reboot and flash behavior
+still require physical validation; host and ARM simulation checks have passed.
+Module downloads, upload progress and errors appear beneath their own cards.
+The connection panel disappears once the module registry is connected, and
+background catalog checks do not display progress cards.
+Bulk file writes use a separate bounded 16 KiB buffer; CPC2 control payloads stay
+limited to 512 bytes. A 12-byte ID/op poll retrieves cached replies on the receive
+owner, with 25/50/100 ms backoff and full-request retry after one second if needed.
+Writes stay ordered on the resident owner, retaining signed size/hash validation,
+duplicate suppression and safe-mode guards. Request IDs are reserved durably in
+ranges of 4096, and upload UI rendering is limited to once per 400 ms.
+Update both the plugin and loader to use bulk delivery. Host/ARM checks do not
+establish physical BLE throughput or device acceptance.
+Enable/disable/remove save next-load
+intent; they do not hot-unload resident code. Install the matching new chem and
+NoirMusic builds, then reload this plugin. Music uses `com.chem.music`.
+Native .chem installation validates the signed receipt, target and firmware, then
+streams directly to Chem. Cloud refresh lists compatible modules with Install
+and Update actions. cloud.json points to OctopusCat101/ChemCloud through
+https://gh-proxy.com/ . Other modules have no content importer.
+
+Startup automatically checks the host connection, exact device identity and
+resident service. If that probe fails, it checks the installer version.
+Missing or old installers show one Install button. Only that
+user click starts downloading, verification and queue submission. The download
+shows received bytes, percentage and elapsed time, and can be cancelled.
+An installed, inactive installer also requires an Open click to switch.
+Once installation is requested, the client polls actual installation and waits
+for Run. Astro API 4 exposes queue submission only, so starting that upload may
+still require the host queue. Cloud modules similarly download, verify and import
+after one Install or Update click. Opening or refreshing never starts installation.
+No device page or manual module-connection sequence is needed.
+
+Cloud requests use nonblocking WASI HTTP polling, bounded ticks, a 10-second
+connect timeout, 20 seconds without data and a two-minute total deadline. The UI
+remains responsive while waiting; errors leave install/retry actions available.
+Both response futures and body streams subscribe and poll readiness before reads,
+so the host can advance pending HTTP responses without blocking the UI.
+Known-length downloads complete on the last byte, with catalog/HTTP length and
+SHA-256 checks. Completion, verification and host queue submission update the UI
+before filesystem/queue calls, so a pending host call cannot look like a stalled
+98% download. The download timer stops after the completion handoff.
+
+Known host blocker: the current published API 4 Queue implementation calls
+`block_on` inside its Tokio driver. A real 1.7.5 run on 2026-11-11 panicked with
+`Cannot start a runtime from within a runtime` and terminated the plugin driver.
+Downloaded loader bytes were complete and matched the published SHA-256.
+The host must dispatch queue permission and enqueue work asynchronously and
+resolve plugin-relative paths before passing them to the frontend. See the
+[official queue contract](https://abox.run/docs/plugin-development/v2/host-api/queue).
+Changing this plugin's progress display cannot repair that host panic.
 
 Optional local artwork/LRC and automatic NetEase artwork/lyrics are supported.
-Version 1.4.3 generates real 160x160 wearable artwork, independently of audio
+Version 1.5.0 generates real 160x160 wearable artwork, independently of audio
 quality. Importing covers requires NoirMusic 0.4.50 / code82 or later.
 Only 160x160 covers are supported; previously imported 96x96 covers must be reimported.
 MP3 compression and optional SBC preconversion use streaming anti-alias FIR
@@ -56,12 +128,13 @@ dist/manifest.json and its declared resources are accessible as raw files.
 ## Architecture
 
 - ui.rs: views/actions; state.rs: view state; lib.rs: async event dispatch.
+- connection.rs: automatic host connection checks and service discovery.
 - transfer.rs: one pending request, 16 KiB reads, durable offsets, safe retry,
   sequential cancel, incremental CRC32; no entire-file allocation.
 - protocol.rs: bounded protobuf and native import envelope.
 - netease.rs: service API and streaming download to disk.
 
-Direct importing currently targets Band 9 N66TC / 3.1.32. Building WASM and
+Direct importing currently targets Band 9 N66TC / 3.1.35. Building WASM and
 checking firmware addresses cannot confirm the real-device handshake. NetEase
 availability depends on the account and service. This release imports audio, metadata, device-ready NCV1 covers and UTF-8 LRC or
 NetEase lyric JSON (including translations). Optional cloud attachment failures
@@ -70,11 +143,14 @@ require code82. SBC without attachments retains its earlier code59 minimum.
 
 ## Connecting and layout
 
-First scan/connect the band in AstroBox Devices. ChemClient lists connected devices;
-the host plugin API does not expose radio scanning or initiating a connection.
-Open the Device tab, press Refresh devices, and select a connected band to handshake
-with NoirMusic. Opening/reopening the UI renders immediately without starting I/O.
-Reload the plugin before switching to another band.
+Connect the band in Astro first. At plugin startup, ChemClient automatically reads
+Astro's connected devices, syncs the Chem module list, and prepares the NoirMusic
+import service when that module is enabled and loaded. No separate device or
+manager connection is needed. Device connection events also recheck automatically;
+if no band or service is available, the UI shows one message and Refresh.
+Refresh repeats the same automatic flow without interrupting an active import.
+With multiple connected bands, the current band is preferred; otherwise the band
+with the first address in sorted order is used. Reopening the UI renders immediately.
 
 All lifecycle/event exports use official WIT async func and the API 4 persistent
 runtime. UI actions have a non-queuing guard; tabs and input remain available during

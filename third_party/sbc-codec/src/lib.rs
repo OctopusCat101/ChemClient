@@ -4,14 +4,14 @@ pub mod convert;
 pub mod resample;
 
 unsafe extern "C" {
-    fn canopus_sbc_encoder_size() -> u32;
-    fn canopus_sbc_encoder_init(
+    fn chem_sbc_encoder_size() -> u32;
+    fn chem_sbc_encoder_init(
         memory: *mut c_void,
         size: u32,
         bitpool: u8,
         mode: u8,
     ) -> *mut c_void;
-    fn canopus_sbc_encoder_encode(
+    fn chem_sbc_encoder_encode(
         context: *mut c_void,
         pcm: *const i16,
         frames: u32,
@@ -32,10 +32,10 @@ impl Encoder {
         if !(27..=53).contains(&bitpool) || !matches!(mode, 2 | 3) {
             return Err("Unsupported SBC profile".into());
         }
-        let size = unsafe { canopus_sbc_encoder_size() };
+        let size = unsafe { chem_sbc_encoder_size() };
         let mut storage = vec![0; size as usize];
         let context =
-            unsafe { canopus_sbc_encoder_init(storage.as_mut_ptr().cast(), size, bitpool, mode) };
+            unsafe { chem_sbc_encoder_init(storage.as_mut_ptr().cast(), size, bitpool, mode) };
         if context.is_null() {
             return Err("SBC initialization failed".into());
         }
@@ -48,7 +48,7 @@ impl Encoder {
 
     pub fn encode(&mut self, pcm: &[i16; 256], output: &mut [u8; 119]) -> Result<usize, String> {
         let result = unsafe {
-            canopus_sbc_encoder_encode(
+            chem_sbc_encoder_encode(
                 self.context,
                 pcm.as_ptr(),
                 128,

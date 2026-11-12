@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "targets": [
+    {
+      "model": "xiaomi-band-9",
+      "firmware": "3.1.35",
+      "target": "xiaomi-band-9-3.1.35",
+      "firmware_sha256": "03e838857f68a98688173053c19990571c44a561cbb90d92a7fa798c85a32522",
+      "device_ids": [
+        "M2346B1",
+        "miwear.watch.n66tc",
+        "n66tc",
+        "N66TC",
+        "xiaomi.watch.n66",
+        "M2345B1"
+      ],
+      "loader": {
+        "version": 638652945,
+        "face_id": "913211211",
+        "path": "xiaomi-band-9/3.1.35/chem-loader/Chem-Band9-3.1.35.face",
+        "size": 264620,
+        "sha256": "b570aabc827654c2eeeecbb382b139607e9ad487f1daad71b9cacacb9c1e4f99"
+      },
+      "modules": [
+        {
+          "id": "bluetooth_audio",
+          "name": "NoirMusic",
+          "version": 90,
+          "version_name": "0.4.58",
+          "path": "xiaomi-band-9/3.1.35/NoirMusic/NoirMusic-Band9-3.1.35.chem",
+          "size": 320488,
+          "sha256": "ccb31e59a68ba39377476d1b83f07aacb27bedc86d399714fc00742c790bba79"
+        }
+      ]
+    }
+  ]
+}

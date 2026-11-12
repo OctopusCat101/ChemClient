@@ -1,4 +1,9 @@
-# Audio compression dependencies
+# Dependencies
+
+Native package import uses zip 2.x (MIT), sha2 0.10 and ed25519-dalek 2.x
+(MIT OR Apache-2.0) for bounded ZIP reading, SHA-256 and strict Ed25519
+verification. Their exact versions and transitive dependencies are pinned in
+Cargo.lock; source and licenses are available through cargo vendor --locked.
 
 ChemClient 1.4.0 uses shine-rs 0.1.5 (LGPL-2.0) for MP3 encoding.
 Upstream: https://github.com/wshon/shine-rs ; exact registry revision is pinned in Cargo.lock.

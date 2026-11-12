@@ -16,7 +16,7 @@ fn main() {
     let compiler = env::var("CC").unwrap_or_else(|_| "clang".into());
     let archiver = env::var("AR").unwrap_or_else(|_| "llvm-ar".into());
     let mut objects = Vec::new();
-    for source in ["sbc", "sbc_primitives", "canopus_sbc_wrapper"] {
+    for source in ["sbc", "sbc_primitives", "chem_sbc_wrapper"] {
         let object = out.join(format!("{source}.o"));
         let mut cmd = Command::new(&compiler);
         if target.starts_with("wasm32") {
@@ -31,7 +31,7 @@ fn main() {
             "-fno-builtin",
             "-fdata-sections",
             "-ffunction-sections",
-            "-DCANOPUS_FREESTANDING=1",
+            "-DCHEM_FREESTANDING=1",
             "-D__BYTE_ORDER=__ORDER_LITTLE_ENDIAN__",
             "-D__LITTLE_ENDIAN=__ORDER_LITTLE_ENDIAN__",
             "-D__BIG_ENDIAN=__ORDER_BIG_ENDIAN__",

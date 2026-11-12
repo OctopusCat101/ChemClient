@@ -1,5 +1,5 @@
 //! Bounded binary envelope inside the documented Xiaomi ThirdpartyApp protobuf.
-pub const PACKAGE: &str = "com.canopus.music";
+pub const PACKAGE: &str = "com.chem.music";
 pub const CHUNK: usize = 16 * 1024;
 fn varint(mut n: u64, out: &mut Vec<u8>) {
     while n >= 128 {
@@ -22,14 +22,15 @@ pub fn frame(request: u32, op: u8, args: &[u8]) -> Vec<u8> {
     v.extend_from_slice(args);
     v
 }
-pub fn encode(data: &[u8]) -> Vec<u8> {
+pub fn encode(data: &[u8]) -> Vec<u8> { encode_package(PACKAGE, data) }
+pub fn encode_package(package: &str, data: &[u8]) -> Vec<u8> {
     fn field_size(n: usize) -> usize {
         let mut value = n;
         let mut prefix = 1;
         while value >= 128 { prefix += 1; value >>= 7; }
         1 + prefix + n
     }
-    let info_size = field_size(PACKAGE.len()) + 2;
+    let info_size = field_size(package.len()) + 2;
     let message_size = field_size(info_size) + field_size(data.len());
     let third_size = field_size(message_size);
     // Encode the nested envelope directly: no audio-sized intermediate Vecs.
@@ -41,8 +42,8 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
     packet.push(10);
     varint(info_size as u64, &mut packet);
     packet.push(10);
-    varint(PACKAGE.len() as u64, &mut packet);
-    packet.extend_from_slice(PACKAGE.as_bytes());
+    varint(package.len() as u64, &mut packet);
+    packet.extend_from_slice(package.as_bytes());
     packet.extend_from_slice(&[18, 0, 18]);
     varint(data.len() as u64, &mut packet);
     packet.extend_from_slice(data);
@@ -63,7 +64,7 @@ fn take_varint(b: &[u8], i: &mut usize) -> Option<u64> {
     }
     None
 }
-fn fields(b: &[u8], wanted: u64) -> Option<&[u8]> {
+pub(crate) fn fields(b: &[u8], wanted: u64) -> Option<&[u8]> {
     let mut i = 0;
     while i < b.len() {
         let tag = take_varint(b, &mut i)?;
@@ -91,6 +92,12 @@ fn fields(b: &[u8], wanted: u64) -> Option<&[u8]> {
         }
     }
     None
+}
+pub fn decode_package<'a>(packet: &'a [u8], package: &str) -> Option<&'a [u8]> {
+    if packet.len() > 8192 { return None; }
+    let message = fields(fields(packet, 22)?, 9)?;
+    if fields(fields(message, 1)?, 1)? != package.as_bytes() { return None; }
+    fields(message, 2)
 }
 pub fn decode(packet: &[u8]) -> Option<(u32, i32, serde_json::Value)> {
     if packet.len() > 8192 {
