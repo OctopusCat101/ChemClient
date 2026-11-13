@@ -5,12 +5,7 @@ pub mod resample;
 
 unsafe extern "C" {
     fn chem_sbc_encoder_size() -> u32;
-    fn chem_sbc_encoder_init(
-        memory: *mut c_void,
-        size: u32,
-        bitpool: u8,
-        mode: u8,
-    ) -> *mut c_void;
+    fn chem_sbc_encoder_init(memory: *mut c_void, size: u32, bitpool: u8, mode: u8) -> *mut c_void;
     fn chem_sbc_encoder_encode(
         context: *mut c_void,
         pcm: *const i16,

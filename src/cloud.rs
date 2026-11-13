@@ -122,8 +122,8 @@ fn artifact(a: &Artifact, max: u64, prefix: &str, extension: &str) -> Result<(),
 }
 #[cfg(test)]
 pub fn fixture() -> Result<Catalog, String> {
-    let c: Catalog =
-        serde_json::from_str(include_str!("../tests/fixtures/catalog.json")).map_err(|e| e.to_string())?;
+    let c: Catalog = serde_json::from_str(include_str!("../tests/fixtures/catalog.json"))
+        .map_err(|e| e.to_string())?;
     validate(&c)?;
     Ok(c)
 }

@@ -22,12 +22,17 @@ pub fn frame(request: u32, op: u8, args: &[u8]) -> Vec<u8> {
     v.extend_from_slice(args);
     v
 }
-pub fn encode(data: &[u8]) -> Vec<u8> { encode_package(PACKAGE, data) }
+pub fn encode(data: &[u8]) -> Vec<u8> {
+    encode_package(PACKAGE, data)
+}
 pub fn encode_package(package: &str, data: &[u8]) -> Vec<u8> {
     fn field_size(n: usize) -> usize {
         let mut value = n;
         let mut prefix = 1;
-        while value >= 128 { prefix += 1; value >>= 7; }
+        while value >= 128 {
+            prefix += 1;
+            value >>= 7;
+        }
         1 + prefix + n
     }
     let info_size = field_size(package.len()) + 2;
@@ -94,9 +99,13 @@ pub(crate) fn fields(b: &[u8], wanted: u64) -> Option<&[u8]> {
     None
 }
 pub fn decode_package<'a>(packet: &'a [u8], package: &str) -> Option<&'a [u8]> {
-    if packet.len() > 8192 { return None; }
+    if packet.len() > 8192 {
+        return None;
+    }
     let message = fields(fields(packet, 22)?, 9)?;
-    if fields(fields(message, 1)?, 1)? != package.as_bytes() { return None; }
+    if fields(fields(message, 1)?, 1)? != package.as_bytes() {
+        return None;
+    }
     fields(message, 2)
 }
 pub fn decode(packet: &[u8]) -> Option<(u32, i32, serde_json::Value)> {
@@ -123,14 +132,20 @@ mod tests {
     #[test]
     fn direct_encoding_matches_the_nested_wire_format_at_length_boundaries() {
         use super::*;
-        for size in [0,1,127,128,16383,16384,16397] {
-            let data=vec![0xa5;size];
-            let mut info=Vec::new(); field(10,PACKAGE.as_bytes(),&mut info); field(18,&[],&mut info);
-            let mut message=Vec::new(); field(10,&info,&mut message); field(18,&data,&mut message);
-            let mut third=Vec::new(); field(74,&message,&mut third);
-            let mut expected=vec![8,20,16,8,178,1];
-            varint(third.len() as u64,&mut expected); expected.extend_from_slice(&third);
-            assert_eq!(encode(&data),expected,"payload size {size}");
+        for size in [0, 1, 127, 128, 16383, 16384, 16397] {
+            let data = vec![0xa5; size];
+            let mut info = Vec::new();
+            field(10, PACKAGE.as_bytes(), &mut info);
+            field(18, &[], &mut info);
+            let mut message = Vec::new();
+            field(10, &info, &mut message);
+            field(18, &data, &mut message);
+            let mut third = Vec::new();
+            field(74, &message, &mut third);
+            let mut expected = vec![8, 20, 16, 8, 178, 1];
+            varint(third.len() as u64, &mut expected);
+            expected.extend_from_slice(&third);
+            assert_eq!(encode(&data), expected, "payload size {size}");
         }
     }
     use super::*;

@@ -1,6 +1,6 @@
 # ChemClient
 
-ChemClient 1.7.23 is the Chem module manager and NoirMusic importer for API 4 / WASI 2.
+ChemClient 1.7.32 is the Chem module manager and NoirMusic/Magic importer for API 4 / WASI 2.
 Select an installed module to open its content uploader directly. The enable switch,
 Delete and available Update icons share one compact row beside the module.
 Normal rows show only the module name and controls. Delete uses a static trash
@@ -43,7 +43,8 @@ NoirMusic builds, then reload this plugin. Music uses `com.chem.music`.
 Native .chem installation validates the signed receipt, target and firmware, then
 streams directly to Chem. Cloud refresh lists compatible modules with Install
 and Update actions. cloud.json points to OctopusCat101/ChemCloud through
-https://gh-proxy.com/ . Other modules have no content importer.
+https://gh-proxy.com/ . Magic provides resource package import and management;
+other unsupported modules show their management controls only.
 
 Startup automatically checks the host connection, exact device identity and
 resident service. If that probe fails, it checks the installer version.
@@ -116,7 +117,6 @@ Output stays entirely inside this plugin:
 
     ChemClient/                 # independent repository root
     ├── index.txt              # contains: dist
-    ├── .github/workflows/chemclient.yml
     ├── third_party/            # MP3/SBC codecs, format source and licenses
     ├── dist/
     │   ├── manifest.json
@@ -126,6 +126,7 @@ Output stays entirely inside this plugin:
     └── out/cargo/              # ignored compilation cache
 
 ABP is for local installation; the plugin market reads the unpacked files.
+This personal project has no GitHub Actions workflows; builds and checks run locally.
 Upload this repository as the GitHub repository root. Its index.txt
 contains the single relative path dist. All build inputs are inside this directory.
 

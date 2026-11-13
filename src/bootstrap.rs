@@ -20,15 +20,24 @@ struct Waiting {
 }
 impl Waiting {
     fn probe_failed(&mut self) -> bool {
-        if self.queued { return false; }
+        if self.queued {
+            return false;
+        }
         self.inspect = !self.inspected;
         self.since.elapsed().as_secs() < 180
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstallerAction { Install, Open }
+pub enum InstallerAction {
+    Install,
+    Open,
+}
 #[derive(Clone)]
-struct Candidate { addr: String, target: cloud::Target, path: Option<String> }
+struct Candidate {
+    addr: String,
+    target: cloud::Target,
+    path: Option<String>,
+}
 #[derive(Default)]
 struct Bootstrap {
     candidate: Option<Candidate>,
@@ -40,8 +49,13 @@ struct Bootstrap {
 }
 impl Bootstrap {
     fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog)> {
-        if self.device_info.is_none() || self.catalog.is_none() { return None; }
-        Some((self.device_info.take().unwrap(), self.catalog.take().unwrap()))
+        if self.device_info.is_none() || self.catalog.is_none() {
+            return None;
+        }
+        Some((
+            self.device_info.take().unwrap(),
+            self.catalog.take().unwrap(),
+        ))
     }
 }
 static BOOT: OnceLock<Mutex<Bootstrap>> = OnceLock::new();
@@ -58,7 +72,9 @@ pub fn reset() {
         b.waiting = None;
         if let Some(c) = b.candidate.take() {
             if !queued {
-                if let Some(path) = c.path { let _ = std::fs::remove_file(path); }
+                if let Some(path) = c.path {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
         b.polling = false;
@@ -73,43 +89,15 @@ pub fn connected() {
         s.status.clear();
     });
 }
-pub async fn update_required() {
-    with(|b| b.waiting = None);
-    modules::reset_connection();
-    crate::transfer::reset_connection();
-    let addr = state::snapshot().addr;
-    state::with(|s| {
-        s.manager_ready = false;
-        s.native_delivery = false;
-        s.direct = false;
-        s.installer_action = Some(InstallerAction::Install);
-        s.connection = Phase::Installer("Chem 需要更新，请点击安装；安装后重启手环并运行安装器".into());
-        s.status.clear();
-    });
-    ui::rerender();
-    let candidate = with(|b| b.candidate.clone());
-    if let Some(c) = candidate {
-        if let Ok(faces) = watchface::get_watchface_list(addr.clone()).await {
-            if state::snapshot().addr != addr { return; }
-            if faces.iter().any(|f| f.id == c.target.loader.face_id) {
-                state::with(|s| {
-                    s.installer_action = Some(InstallerAction::Open);
-                    s.connection = Phase::Installer("旧版 Chem 仍在运行，请先重启手环，再打开安装器并点击运行".into());
-                });
-            }
-        }
-    }
-    ui::rerender();
-}
 pub fn probe_failed(_error: &str) -> bool {
-    let retrying = with(|b| {
-        b.waiting.as_mut().is_some_and(Waiting::probe_failed)
-    });
+    let retrying = with(|b| b.waiting.as_mut().is_some_and(Waiting::probe_failed));
     if retrying {
         state::with(|s| {
             s.connection = Phase::Installer(if s.installer_action.is_some() {
                 "Chem 尚未运行，请打开安装器并点击运行".into()
-            } else { "暂未连接 Chem，正在重试…".into() });
+            } else {
+                "暂未连接 Chem，正在重试…".into()
+            });
             // Transport details belong in diagnostics, not the connection UI.
             s.status.clear();
         });
@@ -137,10 +125,7 @@ fn identify(packet: &[u8], catalog: &cloud::Catalog) -> Result<cloud::Target, St
         .targets
         .iter()
         .find(|t| {
-            t.firmware == firmware
-                && t.device_ids
-                    .iter()
-                    .any(|id| id.eq_ignore_ascii_case(model))
+            t.firmware == firmware && t.device_ids.iter().any(|id| id.eq_ignore_ascii_case(model))
         })
         .cloned()
         .ok_or_else(|| format!("暂不支持此手环固件：{model} {firmware}"))
@@ -171,19 +156,36 @@ pub async fn start(addr: &str) -> Result<(), String> {
     if let Err(e) = modules::connect_device(addr).await {
         state::with(|s| s.cloud_notice = e);
     }
-    if state::snapshot().connection_epoch != epoch { return Ok(()); }
-    let reply = match crate::connection::bounded(5000,
-        transport::request(addr.to_string(), vec![8, 2, 16, 2, 34, 0])).await
-        .and_then(|r| r.map_err(|e| format!("读取手环型号失败：{e}"))) {
+    if state::snapshot().connection_epoch != epoch {
+        return Ok(());
+    }
+    let reply = match crate::connection::bounded(
+        5000,
+        transport::request(addr.to_string(), vec![8, 2, 16, 2, 34, 0]),
+    )
+    .await
+    .and_then(|r| r.map_err(|e| format!("读取手环型号失败：{e}")))
+    {
         Ok(reply) => reply,
-        Err(e) => { state::with(|s| s.cloud_notice = e); return Ok(()); }
+        Err(e) => {
+            state::with(|s| s.cloud_notice = e);
+            return Ok(());
+        }
     };
-    if state::snapshot().addr != addr || state::snapshot().connection_epoch != epoch { return Ok(()); }
+    if state::snapshot().addr != addr || state::snapshot().connection_epoch != epoch {
+        return Ok(());
+    }
     with(|b| b.device_info = Some(reply));
     prepare_ready(addr).await
 }
-pub async fn catalog_ready(addr: &str, result: Result<cloud::Catalog, String>) -> Result<(), String> {
-    if state::snapshot().addr != addr { return Ok(()); }
+pub async fn catalog_ready(
+    addr: &str,
+    result: Result<cloud::Catalog, String>,
+) -> Result<(), String> {
+    let s = state::snapshot();
+    if s.addr != addr || !s.device_connected() {
+        return Ok(());
+    }
     let catalog = match result {
         Ok(catalog) => catalog,
         Err(e) => {
@@ -197,12 +199,18 @@ pub async fn catalog_ready(addr: &str, result: Result<cloud::Catalog, String>) -
     Ok(())
 }
 async fn prepare_ready(addr: &str) -> Result<(), String> {
-    let Some((reply, catalog)) = with(Bootstrap::take_ready) else { return Ok(()); };
+    let Some((reply, catalog)) = with(Bootstrap::take_ready) else {
+        return Ok(());
+    };
     let target = identify(&reply, &catalog)?;
     let s = state::snapshot();
     if !s.resident_target.is_empty() && s.resident_target != target.target {
         modules::reset_connection();
-        state::with(|s| { s.manager_ready = false; s.manager_busy = false; s.direct = false; });
+        state::with(|s| {
+            s.manager_ready = false;
+            s.manager_busy = false;
+            s.direct = false;
+        });
         return Err("手环框架与当前固件目标不一致".into());
     }
     state::with(|s| {
@@ -212,13 +220,16 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         s.cloud_modules = target.modules.clone();
         s.native_delivery = !s.resident_target.is_empty() && s.resident_capabilities & 1 != 0;
     });
-    with(|b| b.candidate = Some(Candidate { addr: addr.into(), target: target.clone(), path: None }));
-    if s.resident_revision != 0 && s.resident_revision < target.loader.version {
-        if s.active || s.installing { return Ok(()); }
-        update_required().await;
+    with(|b| {
+        b.candidate = Some(Candidate {
+            addr: addr.into(),
+            target: target.clone(),
+            path: None,
+        })
+    });
+    if s.manager_ready {
         return Ok(());
     }
-    if s.manager_ready { return Ok(()); }
     state::with(|s| {
         s.installer_action = None;
         s.connection = Phase::Modules;
@@ -226,7 +237,9 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
     // A resident service works with any watchface. Only inspect/open the
     // installer after a real service probe fails; never gate probing on it.
     wait(addr, target, false);
-    if !state::snapshot().manager_busy { modules::connect_device(addr).await?; }
+    if !state::snapshot().manager_busy {
+        modules::connect_device(addr).await?;
+    }
     ui::rerender();
     Ok(())
 }
@@ -239,15 +252,29 @@ fn installer_action(installed: Option<bool>) -> Option<InstallerAction> {
 }
 fn wait(addr: &str, target: cloud::Target, queued: bool) {
     with(|b| {
-        b.waiting = Some(Waiting { addr: addr.into(), target, queued, since: Instant::now(), inspect: false, inspected: false });
-        if !b.timer { timer::set_interval(2000, "chem-bootstrap"); b.timer = true; }
+        b.waiting = Some(Waiting {
+            addr: addr.into(),
+            target,
+            queued,
+            since: Instant::now(),
+            inspect: false,
+            inspected: false,
+        });
+        if !b.timer {
+            timer::set_interval(2000, "chem-bootstrap");
+            b.timer = true;
+        }
     });
 }
 fn download() -> Result<(), String> {
     let s = state::snapshot();
-    if s.installer_action != Some(InstallerAction::Install) { return Err("请刷新安装器状态".into()); }
+    if s.installer_action != Some(InstallerAction::Install) {
+        return Err("请刷新安装器状态".into());
+    }
     let c = with(|b| b.candidate.clone()).ok_or("请先刷新设备信息")?;
-    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) { return Err("手环连接已变化，请刷新".into()); }
+    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) {
+        return Err("手环连接已变化，请刷新".into());
+    }
     cloud_download::loader(&c.addr, &c.target.loader.artifact)?;
     state::with(|s| s.installer_action = None);
     Ok(())
@@ -255,14 +282,20 @@ fn download() -> Result<(), String> {
 pub async fn download_finished(result: Result<String, String>) {
     match result {
         Ok(path) => {
-            with(|b| { if let Some(c) = &mut b.candidate { c.path = Some(path); } });
+            with(|b| {
+                if let Some(c) = &mut b.candidate {
+                    c.path = Some(path);
+                }
+            });
             state::with(|s| {
                 s.installer_action = Some(InstallerAction::Install);
                 s.connection = Phase::Installer("正在安装 Chem…".into());
                 s.status.clear();
             });
             ui::rerender();
-            if let Err(error) = install().await { download_failed(error); }
+            if let Err(error) = install().await {
+                download_failed(error);
+            }
         }
         Err(error) => download_failed(error),
     }
@@ -277,10 +310,14 @@ pub fn download_failed(error: String) {
 pub async fn install() -> Result<(), String> {
     let s = state::snapshot();
     let c = with(|b| b.candidate.clone()).ok_or("请先刷新设备信息")?;
-    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) { return Err("手环连接已变化，请刷新".into()); }
+    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) {
+        return Err("手环连接已变化，请刷新".into());
+    }
     match s.installer_action {
         Some(InstallerAction::Install) => {
-            let Some(path) = c.path else { return download(); };
+            let Some(path) = c.path else {
+                return download();
+            };
             // This flow starts only after the user clicks Install.
             state::with(|s| {
                 s.installer_action = None;
@@ -290,12 +327,15 @@ pub async fn install() -> Result<(), String> {
             queue::add_resource_to_queue(queue::ResourceType::Watchface, &path);
             state::with(|s| {
                 s.installer_action = None;
-                s.connection = Phase::Installer("已提交安装，请在 Astro 上传队列开始上传，正在等待安装完成…".into());
+                s.connection = Phase::Installer(
+                    "已提交安装，请在 Astro 上传队列开始上传，正在等待安装完成…".into(),
+                );
             });
             wait(&c.addr, c.target, true);
         }
         Some(InstallerAction::Open) => {
-            watchface::set_current_watchface(c.addr.clone(), c.target.loader.face_id.clone()).await
+            watchface::set_current_watchface(c.addr.clone(), c.target.loader.face_id.clone())
+                .await
                 .map_err(|e| format!("打开安装器失败：{e}"))?;
             state::with(|s| {
                 s.installer_action = None;
@@ -345,16 +385,29 @@ pub async fn tick() {
                         with(|b| b.polling = false);
                         return;
                     }
-                    let action = installer_action(faces.iter().find(|f| f.id == w.target.loader.face_id).map(|f| f.is_current));
+                    let action = installer_action(
+                        faces
+                            .iter()
+                            .find(|f| f.id == w.target.loader.face_id)
+                            .map(|f| f.is_current),
+                    );
                     state::with(|s| {
                         s.installer_action = action;
-                        s.connection = Phase::Installer(match action {
-                            Some(InstallerAction::Install) => "需要安装或更新 Chem，请点击安装",
-                            Some(InstallerAction::Open) => "请打开 Chem 安装器并点击运行",
-                            None => "请在手环运行 Chem，正在等待连接…",
-                        }.into());
+                        s.connection = Phase::Installer(
+                            match action {
+                                Some(InstallerAction::Install) => "需要安装或更新 Chem，请点击安装",
+                                Some(InstallerAction::Open) => "请打开 Chem 安装器并点击运行",
+                                None => "请在手环运行 Chem，正在等待连接…",
+                            }
+                            .into(),
+                        );
                     });
-                    with(|b| { if let Some(w) = &mut b.waiting { w.inspected = true; w.inspect = false; } });
+                    with(|b| {
+                        if let Some(w) = &mut b.waiting {
+                            w.inspected = true;
+                            w.inspect = false;
+                        }
+                    });
                 }
                 Err(_) => {} // Service retries remain independent of watchface RPC.
             }
@@ -365,7 +418,9 @@ pub async fn tick() {
                     if let Some(f) = faces.iter().find(|f| f.id == w.target.loader.face_id) {
                         with(|b| {
                             if let Some(c) = &mut b.candidate {
-                                if let Some(path) = c.path.take() { let _ = std::fs::remove_file(path); }
+                                if let Some(path) = c.path.take() {
+                                    let _ = std::fs::remove_file(path);
+                                }
                             }
                         });
                         let result = if f.is_current {
@@ -409,21 +464,33 @@ mod tests {
     #[test]
     fn parallel_discovery_waits_for_both_results_in_either_order() {
         for catalog_first in [false, true] {
-            let mut b=Bootstrap::default();
-            if catalog_first { b.catalog=Some(cloud::fixture().unwrap()); }
-            else { b.device_info=Some(packet("3.1.35","n66tc")); }
+            let mut b = Bootstrap::default();
+            if catalog_first {
+                b.catalog = Some(cloud::fixture().unwrap());
+            } else {
+                b.device_info = Some(packet("3.1.35", "n66tc"));
+            }
             assert!(b.take_ready().is_none());
-            if catalog_first { b.device_info=Some(packet("3.1.35","n66tc")); }
-            else { b.catalog=Some(cloud::fixture().unwrap()); }
-            let (reply,catalog)=b.take_ready().unwrap();
-            assert!(identify(&reply,&catalog).is_ok());
+            if catalog_first {
+                b.device_info = Some(packet("3.1.35", "n66tc"));
+            } else {
+                b.catalog = Some(cloud::fixture().unwrap());
+            }
+            let (reply, catalog) = b.take_ready().unwrap();
+            assert!(identify(&reply, &catalog).is_ok());
             assert!(b.take_ready().is_none());
         }
     }
     #[test]
     fn installer_inspection_waits_for_a_failed_service_probe() {
-        let mut w = Waiting { addr: "band".into(), target: cloud::fixture().unwrap().targets.remove(0),
-            queued: false, since: Instant::now(), inspect: false, inspected: false };
+        let mut w = Waiting {
+            addr: "band".into(),
+            target: cloud::fixture().unwrap().targets.remove(0),
+            queued: false,
+            since: Instant::now(),
+            inspect: false,
+            inspected: false,
+        };
         assert!(!w.inspect);
         assert!(w.probe_failed());
         assert!(w.inspect);
@@ -492,8 +559,16 @@ mod tests {
     #[test]
     fn incomplete_identity_is_rejected_with_the_missing_field_named() {
         let c = cloud::fixture().unwrap();
-        assert!(identify(&packet("", "n66tc"), &c).unwrap_err().contains("固件版本"));
-        assert!(identify(&packet("3.1.35", ""), &c).unwrap_err().contains("型号"));
+        assert!(
+            identify(&packet("", "n66tc"), &c)
+                .unwrap_err()
+                .contains("固件版本")
+        );
+        assert!(
+            identify(&packet("3.1.35", ""), &c)
+                .unwrap_err()
+                .contains("型号")
+        );
         // Unknown fields cannot override an unsupported model.
         let reply = b"\x22\x19\x1a\x17\x12\x063.1.35\x22\x06n66nfc\x2a\x05n66tc";
         assert!(identify(reply, &c).is_err());

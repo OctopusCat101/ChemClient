@@ -1,6 +1,9 @@
 //! Stop-and-wait native delivery. Retries use the manager's cached request ID.
 use crate::{modules, package::Package, state, ui};
-use std::{sync::{Mutex, OnceLock}, time::Instant};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Instant,
+};
 #[derive(Clone, Copy)]
 enum Step {
     Begin,
@@ -42,7 +45,7 @@ pub fn fail(message: String) {
 }
 pub async fn start(path: &str, expected: Option<(&str, u32)>) -> Result<(), String> {
     let s = state::snapshot();
-    if busy() || s.active || s.manager_busy || s.connection.busy() || !s.manager_ready {
+    if busy() || s.active || s.manager_busy || s.connection.busy() || !s.manager_connected() {
         return Err("请等待连接及当前操作完成".into());
     }
     if !s.native_delivery || s.target.is_empty() {
@@ -73,7 +76,15 @@ pub async fn start(path: &str, expected: Option<(&str, u32)>) -> Result<(), Stri
                 .iter()
                 .map(|r| r.len() as u64)
                 .sum::<u64>();
-        s.module_message(&m.id, &m.name, if update { "正在更新…" } else { "正在安装…" });
+        s.module_message(
+            &m.id,
+            &m.name,
+            if update {
+                "正在更新…"
+            } else {
+                "正在安装…"
+            },
+        );
     });
     with(|u| {
         *u = Some(Upload {
@@ -81,7 +92,11 @@ pub async fn start(path: &str, expected: Option<(&str, u32)>) -> Result<(), Stri
             step: Step::Begin,
             cancel: false,
             update,
-            chunk_size: if s.bulk_delivery { modules::BULK_CHUNK } else { 508 },
+            chunk_size: if s.bulk_delivery {
+                modules::BULK_CHUNK
+            } else {
+                508
+            },
             rendered: Instant::now(),
         })
     });
@@ -90,9 +105,14 @@ pub async fn start(path: &str, expected: Option<(&str, u32)>) -> Result<(), Stri
 }
 fn step_op(step: Step) -> u32 {
     match step {
-        Step::Begin => 15, Step::Elf(_) => 16, Step::Finish => 17,
-        Step::ResourceBegin(_) => 26, Step::ResourceWrite(_, _) => 27,
-        Step::ResourceFinish(_) => 28, Step::Install => 2, Step::Abort => 18,
+        Step::Begin => 15,
+        Step::Elf(_) => 16,
+        Step::Finish => 17,
+        Step::ResourceBegin(_) => 26,
+        Step::ResourceWrite(_, _) => 27,
+        Step::ResourceFinish(_) => 28,
+        Step::Install => 2,
+        Step::Abort => 18,
     }
 }
 fn packet(u: &Upload) -> (u32, Vec<u8>) {
@@ -115,7 +135,9 @@ fn packet(u: &Upload) -> (u32, Vec<u8>) {
             b.extend_from_slice(&Sha256::digest(&u.package.resources[i]));
             (26, b)
         }
-        Step::ResourceWrite(i, offset) => (27, chunk(&u.package.resources[i], offset, u.chunk_size)),
+        Step::ResourceWrite(i, offset) => {
+            (27, chunk(&u.package.resources[i], offset, u.chunk_size))
+        }
         Step::ResourceFinish(_) => (28, vec![]),
         Step::Install => {
             let mut b = u.package.manifest.id.as_bytes().to_vec();
@@ -144,7 +166,10 @@ pub async fn cancel() -> Result<(), String> {
             false
         }
     }) {
-        state::with(|s| { let id = s.install_id.clone(); s.module_message(&id, "", "正在取消安装…"); });
+        state::with(|s| {
+            let id = s.install_id.clone();
+            s.module_message(&id, "", "正在取消安装…");
+        });
         Ok(())
     } else {
         Err("当前没有模块导入".into())
@@ -189,7 +214,9 @@ pub async fn received(op: u32, result: u32, data: &[u8]) {
         if matches!(u.step, Step::Elf(_) | Step::ResourceWrite(_, _)) {
             let sent = match u.step {
                 Step::Elf(offset) => u.chunk_size.min(u.package.elf.len() - offset),
-                Step::ResourceWrite(i, offset) => u.chunk_size.min(u.package.resources[i].len() - offset),
+                Step::ResourceWrite(i, offset) => {
+                    u.chunk_size.min(u.package.resources[i].len() - offset)
+                }
                 _ => unreachable!(),
             };
             let wanted = match u.step {
@@ -261,8 +288,13 @@ pub async fn received(op: u32, result: u32, data: &[u8]) {
     }
     let render = with(|slot| match slot {
         Some(u) if u.rendered.elapsed().as_millis() < 400 => false,
-        Some(u) => { u.rendered = Instant::now(); true }
+        Some(u) => {
+            u.rendered = Instant::now();
+            true
+        }
         None => true,
     });
-    if render { ui::rerender(); }
+    if render {
+        ui::rerender();
+    }
 }

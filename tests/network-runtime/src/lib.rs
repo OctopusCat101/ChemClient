@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 mod network;
 #[path = "../../../src/deadline.rs"]
 mod deadline;
+#[path = "../../../src/retry.rs"]
+mod retry;
 wit_bindgen::generate!({ path: "wit", world: "network-check", generate_all });
 struct Check;
 
@@ -19,6 +21,13 @@ async fn get(url: &str, limit: u64) -> Result<Vec<u8>, String> {
 }
 
 async fn local(base: &str) -> Result<(), String> {
+    let mut retry = retry::RetryClock::default();
+    assert!(retry.due(std::time::Duration::from_secs(16)));
+    retry.mark();
+    assert!(!retry.due(std::time::Duration::from_secs(16)));
+    retry.reset();
+    assert!(retry.due(std::time::Duration::from_secs(16)));
+    println!("PASS WASI cold-start/reopen retry clock without underflow");
     assert_eq!(deadline::bounded(100, std::future::ready(42)).await?,42);
     let timeout=Instant::now();
     assert!(deadline::bounded(40, std::future::pending::<()>()).await.is_err());

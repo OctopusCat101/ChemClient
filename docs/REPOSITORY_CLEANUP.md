@@ -1,15 +1,11 @@
-# ChemClient 仓库整理 · 2026-10-31
+# 发布目录整理 · 2026-11-13
 
-项目保留原 Git 历史并迁为独立 ChemClient 目录，不再作为 NoirMusic 内嵌仓库。插件不依赖 Chem SDK；运行协议与现有 NoirMusic 保持兼容。
+ChemClient 1.7.32 的发布文件位于 dist/，根 index.txt 指向 dist。插件仓库独立构建，包含源码、WIT 与第三方许可；不发布固件、私钥、日志或构建缓存。
 
-新目录 release 构建成功，API 4 / WASI 2 组件、manifest、PNG、additional_files 及根 index.txt 检查通过。正式发布目录 dist/ 仅保留 manifest.json、chemclient.wasm、icon.png；没有重新生成 ABP，旧本地安装包已移到忽略的 out/。
+本地安装包为 dist/ChemClient.abp，供 Astro 手动导入；插件源读取 dist/manifest.json、chemclient.wasm、icon.png 及声明的 cloud.json。ABP 与 out/ 构建目录均被 Git 忽略。
 
-发布仓库：https://github.com/OctopusCat101/ChemClient 。当前修改只在本机保存，不自动推送 GitHub 或申请上架。
+已移除 GitHub Actions 自动工作流，构建、格式检查和回归按需在本地运行。临时参考工程、测试音频产物和下载的测试运行时已移出项目；可重复使用的回归测试源码保留。
 
-源码卫生检查、协作说明和 CI 已更新；不携带固件、私钥、个人路径或编译缓存。原生项目的正式私钥按所有者要求在私有 Chem 仓库保存，不进入此插件仓库。
+发布与跨项目提交统一由相邻 ChemCloud 的 release.py / workspace.py 管理，不把上传工具放回 Chem。
 
-## 当前发布文件 SHA256
-
-- `manifest.json`：`6833fd39d605686ba345334d82d592abf4eb71c0a90759ed87fcc4f37cde69b4`
-- `chemclient.wasm`：`bba9bc2eb04b4439ab1e00b474fd3fb38fc6c4fd19ab2bf655241d8474a2c252`
-- `icon.png`：`b06bfe99dd71e7ce36a4ad22cb86e739fdf4050b86a6279020cb1c00a19f2d7f`
+官方 Astro 源已经登记本仓库地址；其聚合索引每四小时刷新一次，推送成功与官方缓存更新是两个独立状态。查看插件页面底部版本号可确认实际运行的版本。

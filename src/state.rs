@@ -19,7 +19,7 @@ impl Drop for ActionGuard {
     fn drop(&mut self) {
         with(|s| {
             s.pending_action.clear();
-            if let Some(job) = s.song_job.as_mut().filter(|j|j.network) {
+            if let Some(job) = s.song_job.as_mut().filter(|j| j.network) {
                 job.network = false;
                 job.message = "下载已中断，可重新导入".into();
             }
@@ -129,18 +129,43 @@ pub struct State {
     pub transcoding: bool,
 }
 impl State {
+    pub fn device_connected(&self) -> bool {
+        !self.addr.is_empty() && self.connected_devices.contains(&self.addr)
+    }
+    pub fn manager_connected(&self) -> bool {
+        self.device_connected()
+            && !self.discovering
+            && self.manager_ready
+            && self.connection == crate::connection::Phase::Ready
+    }
+    pub fn music_connected(&self) -> bool {
+        self.manager_connected() && self.direct && self.modules.iter().any(|m| m.importable())
+    }
+    pub fn needs_update(&self) -> bool {
+        self.resident_revision != 0 && self.resident_revision < self.expected_revision
+    }
     pub fn downloading_artifact(&self) -> bool {
-        self.download.as_ref().is_some_and(|p| !matches!(&p.owner, crate::cloud_download::Owner::Catalog))
+        self.download
+            .as_ref()
+            .is_some_and(|p| !matches!(&p.owner, crate::cloud_download::Owner::Catalog))
     }
     pub fn module_download(&self, id: &str) -> Option<&crate::cloud_download::Progress> {
-        self.download.as_ref().filter(|p| matches!(&p.owner, crate::cloud_download::Owner::Module(owner) if owner == id))
+        self.download.as_ref().filter(
+            |p| matches!(&p.owner, crate::cloud_download::Owner::Module(owner) if owner == id),
+        )
     }
     pub fn module_message(&mut self, id: &str, name: &str, message: &str) {
         if let Some(job) = self.module_jobs.iter_mut().find(|j| j.id == id) {
             job.message = message.into();
-            if !name.is_empty() { job.name = name.into(); }
+            if !name.is_empty() {
+                job.name = name.into();
+            }
         } else {
-            self.module_jobs.push(ModuleJob { id: id.into(), name: name.into(), message: message.into() });
+            self.module_jobs.push(ModuleJob {
+                id: id.into(),
+                name: name.into(),
+                message: message.into(),
+            });
         }
     }
 }
@@ -162,7 +187,10 @@ pub fn snapshot() -> State {
 }
 pub fn error(e: String) {
     with(|s| {
-        if let Some(job) = &mut s.song_job { job.message = e.clone(); job.network = false; }
+        if let Some(job) = &mut s.song_job {
+            job.message = e.clone();
+            job.network = false;
+        }
         s.status = e;
         s.active = false;
     });
@@ -182,8 +210,14 @@ mod tests {
         assert_eq!(s.module_jobs[0].name, "First");
         assert_eq!(s.module_jobs[0].message, "下载超时");
         assert_eq!(s.module_jobs[1].message, "已安装");
-        s.download = Some(Progress { owner: Owner::Module("one".into()), label: String::new(),
-            received: 30, total: Some(100), elapsed: 1, connecting: false });
+        s.download = Some(Progress {
+            owner: Owner::Module("one".into()),
+            label: String::new(),
+            received: 30,
+            total: Some(100),
+            elapsed: 1,
+            connecting: false,
+        });
         assert_eq!(s.module_download("one").unwrap().percent(), Some(30));
         assert!(s.module_download("two").is_none());
         for owner in [Owner::Catalog, Owner::Loader] {

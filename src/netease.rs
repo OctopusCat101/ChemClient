@@ -9,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::{network, state, ui};
 use aes::Aes128;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use cipher::{BlockEncrypt, BlockEncryptMut, KeyInit, block_padding::Pkcs7};
@@ -16,7 +17,6 @@ use md5::{Digest, Md5};
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use crate::{network, state, ui};
 
 use crate::state::{CloudPlaylist, CloudSong};
 
@@ -208,15 +208,17 @@ pub struct PreparedCloud {
 }
 impl PreparedCloud {
     pub fn into_path(mut self) -> String {
-        self.keep=true;
+        self.keep = true;
         std::mem::take(&mut self.path)
     }
 }
 impl Drop for PreparedCloud {
     fn drop(&mut self) {
         if !self.keep {
-            let _=fs::remove_file(&self.path);
-            if let Some(parent)=Path::new(&self.path).parent() { let _=fs::remove_dir(parent); }
+            let _ = fs::remove_file(&self.path);
+            if let Some(parent) = Path::new(&self.path).parent() {
+                let _ = fs::remove_dir(parent);
+            }
         }
     }
 }
@@ -254,7 +256,8 @@ pub async fn user_playlists(cookie: &str) -> Result<Vec<CloudPlaylist>, String> 
         "/api/user/playlist",
         json!({ "uid": uid, "limit": 100, "offset": 0, "includeVideo": true }),
         cookie,
-    )).await?;
+    ))
+    .await?;
     let value: PlaylistEnvelope =
         serde_json::from_slice(&bytes).map_err(|error| format!("无法解析个人歌单：{error}"))?;
     if value.code != 200 {
@@ -277,7 +280,8 @@ pub async fn playlist_tracks(id: u64, cookie: &str) -> Result<(String, Vec<Cloud
         "/api/v6/playlist/detail",
         json!({ "id": id, "n": 1000, "s": 8 }),
         cookie,
-    )).await?;
+    ))
+    .await?;
     let value: PlaylistDetailEnvelope =
         serde_json::from_slice(&bytes).map_err(|error| format!("无法解析歌单歌曲：{error}"))?;
     if value.code != 200 {
@@ -308,7 +312,8 @@ pub async fn begin_qr_login() -> Result<(String, String), String> {
         "/api/login/qrcode/unikey",
         json!({ "type": 1, "noCheckToken": true }),
         &initial_cookie,
-    )?).await?;
+    )?)
+    .await?;
     let value: QrKeyEnvelope = serde_json::from_slice(&response.body)
         .map_err(|error| format!("无法解析二维码登录响应：{error}"))?;
     if value.code != 200 {
@@ -349,7 +354,8 @@ pub async fn poll_qr_login(key: &str) -> Result<Option<String>, String> {
         "/api/login/qrcode/client/login",
         json!({ "key": key, "type": 1, "noCheckToken": true }),
         &cookie,
-    )?).await?;
+    )?)
+    .await?;
     let value: QrCheckEnvelope = serde_json::from_slice(&response.body)
         .map_err(|error| format!("无法解析扫码状态：{error}"))?;
     let mut session = qr_session().lock().unwrap_or_else(|item| item.into_inner());
@@ -389,7 +395,8 @@ pub async fn prepare(
         "/api/song/enhance/player/url",
         json!({ "ids": format!("[\"{}\"]", song.id), "br": audio_bitrate }),
         cookie,
-    )).await?;
+    ))
+    .await?;
     let song_url: SongUrlEnvelope = serde_json::from_slice(&song_url_bytes)
         .map_err(|error| format!("无法解析歌曲地址：{error}"))?;
     if song_url.code != 200 {
@@ -419,74 +426,132 @@ pub async fn prepare(
     }
     let path = path_text(&audio_path)?;
     cleanup.0 = None;
-    Ok(PreparedCloud { path, keep:false })
+    Ok(PreparedCloud { path, keep: false })
 }
 
 async fn perform(request: ApiRequest) -> Result<Vec<u8>, String> {
-    perform_response(request).await.map(|response| response.body)
+    perform_response(request)
+        .await
+        .map(|response| response.body)
 }
 /// Optional cloud assets never prevent importing an otherwise playable song.
 pub async fn prepare_attachments(song: &CloudSong, cookie: &str, metadata: &mut Value) {
     use crate::attachments;
-    if check_cancel().is_err() { return; }
+    if check_cancel().is_err() {
+        return;
+    }
     let _ = fs::create_dir_all("media/attachments");
     // Search results often omit picUrl. Fetch details before giving up artwork.
-    let mut cover_url=song.cover_url.clone();
+    let mut cover_url = song.cover_url.clone();
     if cover_url.is_empty() {
-        if let Ok(bytes)=perform(eapi("/api/v3/song/detail",
-            json!({"c":format!("[{{\"id\":{}}}]",song.id)}),cookie)).await {
-            if let Ok(detail)=serde_json::from_slice::<Value>(&bytes) {
-                cover_url=detail_cover(&detail).into();
+        if let Ok(bytes) = perform(eapi(
+            "/api/v3/song/detail",
+            json!({"c":format!("[{{\"id\":{}}}]",song.id)}),
+            cookie,
+        ))
+        .await
+        {
+            if let Ok(detail) = serde_json::from_slice::<Value>(&bytes) {
+                cover_url = detail_cover(&detail).into();
             }
         }
     }
-    if check_cancel().is_err() { return; }
+    if check_cancel().is_err() {
+        return;
+    }
     if !cover_url.is_empty() {
-        let source=PathBuf::from(format!("media/attachments/{}.jpg",song.id));
-        let separator=if cover_url.contains('?') { '&' } else { '?' };
-        if download(&format!("{cover_url}{separator}param=256y256"),&source,512*1024).await.is_ok() {
-            if let Ok(path)=attachments::cover(&source.to_string_lossy(),song.id) { attachments::add(metadata,path,"cover1"); }
+        let source = PathBuf::from(format!("media/attachments/{}.jpg", song.id));
+        let separator = if cover_url.contains('?') { '&' } else { '?' };
+        if download(
+            &format!("{cover_url}{separator}param=256y256"),
+            &source,
+            512 * 1024,
+        )
+        .await
+        .is_ok()
+        {
+            if let Ok(path) = attachments::cover(&source.to_string_lossy(), song.id) {
+                attachments::add(metadata, path, "cover1");
+            }
         }
         let _ = fs::remove_file(source);
     }
-    if check_cancel().is_err() { return; }
-    if let Ok(bytes)=perform(eapi("/api/song/lyric",json!({"id":song.id,"lv":-1,"kv":-1,"tv":-1}),cookie)).await {
-        if bytes.len()<=96*1024 && serde_json::from_slice::<Value>(&bytes).is_ok_and(|v|v["lrc"]["lyric"].as_str().is_some_and(|s|!s.is_empty())) {
-            let path=format!("media/attachments/{}.json",song.id);
-            if fs::write(&path,bytes).is_ok() { attachments::add(metadata,path,"lyric_json"); }
+    if check_cancel().is_err() {
+        return;
+    }
+    if let Ok(bytes) = perform(eapi(
+        "/api/song/lyric",
+        json!({"id":song.id,"lv":-1,"kv":-1,"tv":-1}),
+        cookie,
+    ))
+    .await
+    {
+        if bytes.len() <= 96 * 1024
+            && serde_json::from_slice::<Value>(&bytes)
+                .is_ok_and(|v| v["lrc"]["lyric"].as_str().is_some_and(|s| !s.is_empty()))
+        {
+            let path = format!("media/attachments/{}.json", song.id);
+            if fs::write(&path, bytes).is_ok() {
+                attachments::add(metadata, path, "lyric_json");
+            }
         }
     }
 }
 
 fn detail_cover(detail: &Value) -> &str {
-    detail["songs"][0]["al"]["picUrl"].as_str().filter(|s|!s.is_empty())
-        .or_else(||detail["songs"][0]["album"]["picUrl"].as_str()).unwrap_or("")
+    detail["songs"][0]["al"]["picUrl"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| detail["songs"][0]["album"]["picUrl"].as_str())
+        .unwrap_or("")
 }
 
 async fn perform_response(request: ApiRequest) -> Result<ApiResponse, String> {
     check_cancel()?;
     let mut bytes = Vec::new();
-    let response = network::fetch(&request.url, true, &request.headers, request.body, 2 * 1024 * 1024,
-        |chunk| { bytes.extend_from_slice(chunk); Ok(()) }, |_, _, _| check_cancel()).await?;
-    Ok(ApiResponse { body: bytes, cookies: response.cookies })
+    let response = network::fetch(
+        &request.url,
+        true,
+        &request.headers,
+        request.body,
+        2 * 1024 * 1024,
+        |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        },
+        |_, _, _| check_cancel(),
+    )
+    .await?;
+    Ok(ApiResponse {
+        body: bytes,
+        cookies: response.cookies,
+    })
 }
 
 struct PartialFile(Option<PathBuf>);
 impl Drop for PartialFile {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
-            let _=fs::remove_file(path);
-            if path.file_name().is_some_and(|name|name=="audio.mp3") {
-                if let Some(parent)=path.parent() { let _=fs::remove_dir(parent); }
+            let _ = fs::remove_file(path);
+            if path.file_name().is_some_and(|name| name == "audio.mp3") {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::remove_dir(parent);
+                }
             }
         }
     }
 }
 
 fn check_cancel() -> Result<(), String> {
-    if state::with(|s| s.song_job.as_ref().is_some_and(|j| j.network && j.cancel_requested)) {
+    if state::with(|s| {
+        s.song_job
+            .as_ref()
+            .is_some_and(|j| j.network && j.cancel_requested)
+    }) {
         Err("已取消下载".into())
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 async fn download(url: &str, path: &PathBuf, limit: u64) -> Result<u64, String> {
@@ -496,28 +561,51 @@ async fn download(url: &str, path: &PathBuf, limit: u64) -> Result<u64, String> 
     let audio = path.file_name().is_some_and(|name| name == "audio.mp3");
     let mut received = 0;
     let mut rendered = std::time::Instant::now();
-    let result = network::fetch(url, false, &[
-        ("User-Agent".into(), USER_AGENT.into()), ("Referer".into(), "https://music.163.com/".into()),
-        ("Accept".into(), "*/*".into())], vec![], limit,
-        |chunk| { file.write_all(chunk).map_err(|e| format!("写入下载文件失败：{e}"))?; received += chunk.len() as u64; Ok(()) },
+    let result = network::fetch(
+        url,
+        false,
+        &[
+            ("User-Agent".into(), USER_AGENT.into()),
+            ("Referer".into(), "https://music.163.com/".into()),
+            ("Accept".into(), "*/*".into()),
+        ],
+        vec![],
+        limit,
+        |chunk| {
+            file.write_all(chunk)
+                .map_err(|e| format!("写入下载文件失败：{e}"))?;
+            received += chunk.len() as u64;
+            Ok(())
+        },
         |bytes, total, elapsed| {
             check_cancel()?;
             if audio && (rendered.elapsed().as_millis() >= 200 || total == Some(bytes)) {
-                state::with(|s| if let Some(job) = &mut s.song_job {
-                    job.received = bytes; job.total = total;
-                    job.elapsed = elapsed.as_secs();
-                    job.speed = (bytes as f64 / elapsed.as_secs_f64().max(0.01)) as u64;
-                    job.message = "正在下载歌曲".into();
+                state::with(|s| {
+                    if let Some(job) = &mut s.song_job {
+                        job.received = bytes;
+                        job.total = total;
+                        job.elapsed = elapsed.as_secs();
+                        job.speed = (bytes as f64 / elapsed.as_secs_f64().max(0.01)) as u64;
+                        job.message = "正在下载歌曲".into();
+                    }
                 });
                 rendered = std::time::Instant::now();
                 ui::rerender();
             }
             Ok(())
-        }).await;
+        },
+    )
+    .await;
     drop(file);
     match result {
-        Ok(_) => { cleanup.0=None; Ok(received) },
-        Err(error) => { let _ = fs::remove_file(path); Err(error) }
+        Ok(_) => {
+            cleanup.0 = None;
+            Ok(received)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(path);
+            Err(error)
+        }
     }
 }
 
@@ -732,9 +820,19 @@ mod tests {
     #[test]
     fn detail_lookup_supports_both_album_shapes() {
         use serde_json::json;
-        assert_eq!(super::detail_cover(&json!({"songs":[{"al":{"picUrl":"https://p1.music.126.net/a.jpg"}}]})),"https://p1.music.126.net/a.jpg");
-        assert_eq!(super::detail_cover(&json!({"songs":[{"album":{"picUrl":"https://p1.music.126.net/b.jpg"}}]})),"https://p1.music.126.net/b.jpg");
-        assert_eq!(super::detail_cover(&json!({"songs":[]})),"");
+        assert_eq!(
+            super::detail_cover(
+                &json!({"songs":[{"al":{"picUrl":"https://p1.music.126.net/a.jpg"}}]})
+            ),
+            "https://p1.music.126.net/a.jpg"
+        );
+        assert_eq!(
+            super::detail_cover(
+                &json!({"songs":[{"album":{"picUrl":"https://p1.music.126.net/b.jpg"}}]})
+            ),
+            "https://p1.music.126.net/b.jpg"
+        );
+        assert_eq!(super::detail_cover(&json!({"songs":[]})), "");
     }
 
     use super::*;

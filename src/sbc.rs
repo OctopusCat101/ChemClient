@@ -72,7 +72,9 @@ pub fn start(source: String, song: Value, temporary: bool) -> Result<(), String>
 }
 
 fn dispose(j: Job, remove_output: bool) {
-    if remove_output { crate::attachments::cleanup(&j.song); }
+    if remove_output {
+        crate::attachments::cleanup(&j.song);
+    }
     timer::clear_timer(j.timer);
     let source = j.source.clone();
     let output = j.output.clone();
@@ -95,7 +97,9 @@ pub fn cancel() -> bool {
         s.active = false;
         s.transcoding = false;
         s.status = "已取消预解码".into();
-        if let Some(job)=&mut s.song_job { job.message=s.status.clone(); }
+        if let Some(job) = &mut s.song_job {
+            job.message = s.status.clone();
+        }
     });
     true
 }

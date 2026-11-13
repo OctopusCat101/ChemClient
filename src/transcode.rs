@@ -49,9 +49,11 @@ struct Job {
 thread_local! { static JOB: RefCell<Option<Job>> = const { RefCell::new(None) }; }
 
 pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
-    let assets=song.clone();
-    let result=begin(path,song,temporary,quality).await;
-    if result.is_err() { crate::attachments::cleanup(&assets); }
+    let assets = song.clone();
+    let result = begin(path, song, temporary, quality).await;
+    if result.is_err() {
+        crate::attachments::cleanup(&assets);
+    }
     result
 }
 async fn begin(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
@@ -253,12 +255,16 @@ pub fn cancel() -> bool {
         s.transcoding = false;
         s.active = false;
         s.status = "已取消压缩".into();
-        if let Some(job)=&mut s.song_job { job.message=s.status.clone(); }
+        if let Some(job) = &mut s.song_job {
+            job.message = s.status.clone();
+        }
     });
     true
 }
 fn dispose(j: Job, remove_output: bool) {
-    if remove_output { crate::attachments::cleanup(&j.song); }
+    if remove_output {
+        crate::attachments::cleanup(&j.song);
+    }
     timer::clear_timer(j.timer);
     let path = j.output_path.clone();
     let source = j.source_path.clone();

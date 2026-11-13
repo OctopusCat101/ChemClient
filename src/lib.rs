@@ -2,18 +2,20 @@
 use exports::astrobox::psys_plugin_v4::{event, lifecycle};
 use std::io::Read;
 
-mod modules;
-mod connection;
-mod deadline;
-mod package;
-mod delivery;
+mod attachments;
+mod bootstrap;
 mod cloud;
 mod cloud_download;
-mod bootstrap;
+mod connection;
+mod deadline;
+mod delivery;
+mod magic;
+mod modules;
 mod netease;
 mod network;
-mod attachments;
+mod package;
 mod protocol;
+mod retry;
 mod sbc;
 mod state;
 mod transcode;
@@ -40,7 +42,10 @@ impl lifecycle::Guest for ChemClient {
 impl event::Guest for ChemClient {
     async fn on_event(kind: event::EventType, payload: String) -> String {
         match kind {
-            event::EventType::TransportPacket => { modules::received(&payload).await; transfer::received(&payload).await; },
+            event::EventType::TransportPacket => {
+                modules::received(&payload).await;
+                transfer::received(&payload).await;
+            }
             event::EventType::Timer => {
                 // Host timers carry their identity and application payload.
                 // Compression ticks must not multiply pending BLE polls.
@@ -52,6 +57,7 @@ impl event::Guest for ChemClient {
                 match tag {
                     "music-compression" => transcode::tick().await,
                     "music-link" => transfer::tick().await,
+                    "magic-link" => magic::tick().await,
                     "chem-manager" => modules::tick().await,
                     "chem-bootstrap" => bootstrap::tick().await,
                     "chem-download" => cloud_download::tick().await,

@@ -1,40 +1,103 @@
 //! Reuse the host connection, then discover services without a separate UI flow.
 use crate::{astrobox::psys_host_v4::device, modules, state, transfer, ui};
-use std::{sync::{Mutex, OnceLock}, time::{Duration, Instant}};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
-struct Retry { service: Instant, music: Instant }
+struct Retry {
+    service: crate::retry::RetryClock,
+    music: Instant,
+    devices: crate::retry::RetryClock,
+    checking_devices: bool,
+}
 static RETRY: OnceLock<Mutex<Retry>> = OnceLock::new();
 fn retries() -> &'static Mutex<Retry> {
-    RETRY.get_or_init(|| Mutex::new(Retry { service: Instant::now(), music: Instant::now() }))
+    RETRY.get_or_init(|| {
+        Mutex::new(Retry {
+            service: Default::default(),
+            music: Instant::now(),
+            devices: Default::default(),
+            checking_devices: false,
+        })
+    })
 }
 pub fn attempted() {
-    retries().lock().unwrap_or_else(|e| e.into_inner()).service = Instant::now();
+    retries()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .service
+        .mark();
 }
 pub fn opened() {
-    retries().lock().unwrap_or_else(|e| e.into_inner()).service = Instant::now() - Duration::from_secs(16);
+    let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
+    last.service.reset();
+    last.devices.reset();
 }
 
 pub use crate::deadline::bounded;
 
 pub async fn tick() {
     let s = state::snapshot();
-    if s.active || s.installing || s.discovering || s.manager_busy
-        || state::action_busy() || transfer::busy() { return; }
+    if !s.addr.is_empty() && !s.discovering {
+        let check = {
+            let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
+            if !last.checking_devices && last.devices.due(Duration::from_secs(2)) {
+                last.checking_devices = true;
+                last.devices.mark();
+                true
+            } else {
+                false
+            }
+        };
+        if check {
+            device_event().await;
+            retries()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .checking_devices = false;
+        }
+    }
+    let s = state::snapshot();
+    if s.active
+        || s.installing
+        || s.discovering
+        || s.manager_busy
+        || state::action_busy()
+        || transfer::busy()
+    {
+        return;
+    }
     let (service, music) = {
         let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
-        let interval = if s.addr.is_empty() { 3 } else if !s.manager_ready { 1 } else if s.boot_status >> 8 != 0 { 2 } else { 15 };
-        let service = last.service.elapsed() >= Duration::from_secs(interval);
-        let music = !s.direct && s.modules.iter().any(|m| m.importable())
+        let interval = if s.addr.is_empty() {
+            3
+        } else if !s.manager_ready {
+            1
+        } else if s.boot_status >> 8 != 0 {
+            2
+        } else {
+            15
+        };
+        let service = last.service.due(Duration::from_secs(interval));
+        let music = !s.direct
+            && s.modules.iter().any(|m| m.importable())
             && last.music.elapsed() >= Duration::from_secs(1);
-        if service { last.service = Instant::now(); }
-        if music { last.music = Instant::now(); }
+        if service {
+            last.service.mark();
+        }
+        if music {
+            last.music = Instant::now();
+        }
         (service, music)
     };
     if service && s.addr.is_empty() {
         state::with(|s| s.discovering = true);
         let devices = bounded(5000, device::get_connected_device_list()).await;
         state::with(|s| s.discovering = false);
-        if devices.is_ok_and(|d| !d.is_empty()) { refresh(false).await; }
+        if devices.is_ok_and(|d| !d.is_empty()) {
+            refresh(false).await;
+        }
     } else if service && !s.manager_ready {
         let _ = modules::connect_device(&s.addr).await;
     } else if service {
@@ -78,7 +141,9 @@ fn apply_devices(
     s.connected_devices = devices.iter().map(|d| d.0.clone()).collect();
     s.devices = devices;
     let Some(addr) = selected else {
-        if !s.addr.is_empty() { s.connection_epoch = s.connection_epoch.wrapping_add(1); }
+        if !s.addr.is_empty() {
+            s.connection_epoch = s.connection_epoch.wrapping_add(1);
+        }
         s.addr.clear();
         s.device_name.clear();
         s.direct = false;
@@ -92,7 +157,10 @@ fn apply_devices(
         s.target.clear();
         s.native_delivery = false;
         s.bulk_delivery = false;
-        s.safe_mode = false; s.safe_reason = 0; s.boot_status = 0; s.safe_exit_pending = false;
+        s.safe_mode = false;
+        s.safe_reason = 0;
+        s.boot_status = 0;
+        s.safe_exit_pending = false;
         s.tab = "modules".into();
         s.status.clear();
         s.connection = Phase::Failed("请先在 Astro 连接手环，然后刷新。".into());
@@ -109,7 +177,10 @@ fn apply_devices(
         s.target.clear();
         s.native_delivery = false;
         s.bulk_delivery = false;
-        s.safe_mode = false; s.safe_reason = 0; s.boot_status = 0; s.safe_exit_pending = false;
+        s.safe_mode = false;
+        s.safe_reason = 0;
+        s.boot_status = 0;
+        s.safe_exit_pending = false;
         s.module_detail.clear();
         s.installer_action = None;
         s.delete_module.clear();
@@ -139,20 +210,37 @@ fn apply_devices(
 
 /// Startup, host device events and the single Refresh button share this path.
 pub async fn refresh(force: bool) {
-    if crate::cloud_download::busy() { return; }
+    if crate::cloud_download::busy() {
+        return;
+    }
     let busy = transfer::busy() || (!force && state::action_busy());
     let start = state::with(|s| begin_check(s, busy));
     if !start {
         return;
     }
-    ui::rerender();
-    let devices = match bounded(5000, device::get_connected_device_list()).await {
-        Ok(devices) => devices,
-        Err(e) => { state::with(|s| s.discovering = false); failed(e); return; }
+    if force {
+        state::with(|s| s.connection_epoch = s.connection_epoch.wrapping_add(1));
+        modules::reset_connection();
+        crate::bootstrap::reset();
+        transfer::reset_connection();
     }
-        .into_iter()
-        .map(|d| (d.addr, d.name))
-        .collect();
+    ui::rerender();
+    let epoch = state::snapshot().connection_epoch;
+    let result = bounded(5000, device::get_connected_device_list()).await;
+    if state::snapshot().connection_epoch != epoch {
+        return;
+    }
+    let devices = match result {
+        Ok(devices) => devices,
+        Err(e) => {
+            state::with(|s| s.discovering = false);
+            failed(e);
+            return;
+        }
+    }
+    .into_iter()
+    .map(|d| (d.addr, d.name))
+    .collect();
     let previous = state::snapshot().addr;
     let addr = state::with(|s| apply_devices(s, devices, force));
     let current = state::snapshot();
@@ -172,27 +260,79 @@ pub async fn refresh(force: bool) {
 
 pub async fn device_event() {
     let current = state::snapshot();
-    let Ok(devices) = bounded(5000, device::get_connected_device_list()).await else { return; };
-    if state::snapshot().connection_epoch != current.connection_epoch { return; }
-    if devices.iter().any(|device|device.addr==current.addr) {
-        if !current.manager_ready && !current.manager_busy && !current.active && !current.installing {
+    let devices = match bounded(5000, device::get_connected_device_list()).await {
+        Ok(devices) => devices,
+        Err(error) => {
+            if state::snapshot().connection_epoch == current.connection_epoch {
+                disconnect(vec![]);
+                failed(error);
+            }
+            return;
+        }
+    };
+    if state::snapshot().connection_epoch != current.connection_epoch {
+        return;
+    }
+    if devices.iter().any(|device| device.addr == current.addr) {
+        state::with(|s| {
+            s.connected_devices = devices.iter().map(|d| d.addr.clone()).collect();
+            s.devices = devices
+                .iter()
+                .map(|d| (d.addr.clone(), d.name.clone()))
+                .collect();
+        });
+        if !current.manager_ready && !current.manager_busy && !current.active && !current.installing
+        {
             let _ = modules::connect_device(&current.addr).await;
         }
         return;
     }
+    if current.addr.is_empty() && devices.is_empty() {
+        return;
+    }
+    disconnect(
+        devices
+            .iter()
+            .map(|d| (d.addr.clone(), d.name.clone()))
+            .collect(),
+    );
+    refresh(false).await;
+}
+
+fn invalidate_device(s: &mut state::State, devices: Vec<(String, String)>) {
+    s.connection_epoch = s.connection_epoch.wrapping_add(1);
+    s.connected_devices = devices.iter().map(|d| d.0.clone()).collect();
+    s.devices = devices;
+    s.manager_ready = false;
+    s.manager_busy = false;
+    s.direct = false;
+    s.native_delivery = false;
+    s.bulk_delivery = false;
+    s.installer_action = None;
+    s.discovering = false;
+    s.resident_revision = 0;
+    s.resident_target.clear();
+    s.resident_capabilities = 0;
+    s.connection = Phase::Failed("手环已断开，请重新连接。".into());
+    s.recheck_connection = true;
+    if let Some(job) = s.song_job.as_mut().filter(|j| j.network) {
+        job.cancel_requested = true;
+        job.message = "手环已断开，正在停止导入".into();
+    }
+}
+
+fn disconnect(devices: Vec<(String, String)>) {
+    state::with(|s| invalidate_device(s, devices));
     crate::cloud_download::cancel(true);
     modules::reset_connection();
-    if crate::delivery::busy() { crate::delivery::fail("手环已断开，安装未完成，请重新连接后重试".into()); }
+    crate::bootstrap::reset();
+    crate::magic::disconnected();
+    if crate::delivery::busy() {
+        crate::delivery::fail("手环已断开，安装未完成，请重新连接后重试".into());
+    }
+    crate::transcode::cancel();
     transfer::disconnected();
-    state::with(|s| {
-        s.connection_epoch = s.connection_epoch.wrapping_add(1);
-        s.connected_devices = devices.iter().map(|d| d.addr.clone()).collect();
-        s.manager_ready = false;
-        s.manager_busy = false;
-        s.direct = false;
-        s.recheck_connection = true;
-    });
-    refresh(false).await;
+    ui::rerender();
 }
 
 fn begin_check(s: &mut state::State, busy: bool) -> bool {
@@ -202,7 +342,10 @@ fn begin_check(s: &mut state::State, busy: bool) -> bool {
     }
     s.recheck_connection = false;
     s.discovering = true;
-    if !s.manager_ready { s.connection = Phase::Checking; }
+    s.manager_ready = false;
+    s.direct = false;
+    s.installer_action = None;
+    s.connection = Phase::Checking;
     true
 }
 
@@ -242,6 +385,37 @@ pub fn failed(message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disconnect_invalidates_controls_even_while_an_import_is_busy() {
+        let mut s = state::State {
+            addr: "A".into(),
+            connected_devices: vec!["A".into()],
+            manager_ready: true,
+            manager_busy: true,
+            direct: true,
+            native_delivery: true,
+            bulk_delivery: true,
+            active: true,
+            installing: true,
+            resident_revision: 123,
+            connection: Phase::Ready,
+            connection_epoch: 7,
+            installer_action: Some(crate::bootstrap::InstallerAction::Install),
+            song_job: Some(state::SongJob {
+                network: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(s.manager_connected());
+        invalidate_device(&mut s, vec![("B".into(), "Other band".into())]);
+        assert_eq!(s.connection_epoch, 8);
+        assert!(!s.device_connected() && !s.manager_connected() && !s.music_connected());
+        assert!(!s.manager_busy && !s.native_delivery && !s.bulk_delivery && !s.discovering);
+        assert!(s.recheck_connection && s.song_job.as_ref().unwrap().cancel_requested);
+        assert!(matches!(s.connection, Phase::Failed(_)));
+        assert_eq!(s.installer_action, None);
+    }
     fn music() -> modules::Module {
         modules::Module {
             id: "bluetooth_audio".into(),
@@ -334,6 +508,34 @@ mod tests {
         assert!(!s.recheck_connection);
         // A second refresh cannot race registration/device discovery.
         assert!(!begin_check(&mut s, false));
+    }
+    #[test]
+    fn refresh_revokes_cached_services_before_the_first_host_request() {
+        let mut s = state::State {
+            addr: "A".into(),
+            connected_devices: vec!["A".into()],
+            manager_ready: true,
+            direct: true,
+            native_delivery: true,
+            connection: Phase::Ready,
+            modules: vec![music()],
+            ..Default::default()
+        };
+        assert!(s.manager_connected() && s.music_connected());
+        assert!(begin_check(&mut s, false));
+        assert!(s.discovering && !s.manager_ready && !s.direct);
+        assert!(!s.manager_connected() && !s.music_connected());
+        assert_eq!(s.connection, Phase::Checking);
+        s.manager_ready = true;
+        s.direct = true;
+        assert!(!s.manager_connected());
+        s.connection = Phase::Ready;
+        assert!(!s.manager_connected());
+        s.discovering = false;
+        s.connection = Phase::Modules;
+        assert!(!s.manager_connected());
+        s.connection = Phase::Ready;
+        assert!(s.manager_connected() && s.music_connected());
     }
     #[test]
     fn changing_bands_never_leaves_old_module_actions_available() {
