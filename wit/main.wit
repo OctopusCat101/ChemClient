@@ -1,5 +1,6 @@
 package chem:client;
 world chem-client {
+  import wasi:clocks/monotonic-clock@0.3.0;
   import astrobox:psys-host-v4/transport;
   import astrobox:psys-host-v4/ui;
   import astrobox:psys-host-v4/dialog;

@@ -35,6 +35,14 @@ struct Bootstrap {
     waiting: Option<Waiting>,
     timer: bool,
     polling: bool,
+    device_info: Option<Vec<u8>>,
+    catalog: Option<cloud::Catalog>,
+}
+impl Bootstrap {
+    fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog)> {
+        if self.device_info.is_none() || self.catalog.is_none() { return None; }
+        Some((self.device_info.take().unwrap(), self.catalog.take().unwrap()))
+    }
 }
 static BOOT: OnceLock<Mutex<Bootstrap>> = OnceLock::new();
 fn with<R>(f: impl FnOnce(&mut Bootstrap) -> R) -> R {
@@ -54,6 +62,8 @@ pub fn reset() {
             }
         }
         b.polling = false;
+        b.device_info = None;
+        b.catalog = None;
     });
 }
 pub fn connected() {
@@ -65,6 +75,8 @@ pub fn connected() {
 }
 pub async fn update_required() {
     with(|b| b.waiting = None);
+    modules::reset_connection();
+    crate::transfer::reset_connection();
     let addr = state::snapshot().addr;
     state::with(|s| {
         s.manager_ready = false;
@@ -135,6 +147,7 @@ fn identify(packet: &[u8], catalog: &cloud::Catalog) -> Result<cloud::Target, St
 }
 pub async fn start(addr: &str) -> Result<(), String> {
     reset();
+    let epoch = state::snapshot().connection_epoch;
     state::with(|s| {
         s.connection = Phase::Checking;
         s.installer_action = None;
@@ -145,29 +158,67 @@ pub async fn start(addr: &str) -> Result<(), String> {
         s.cloud_notice.clear();
         s.target.clear();
         s.firmware_sha256.clear();
+        s.expected_revision = 0;
+        s.resident_revision = 0;
+        s.resident_target.clear();
+        s.resident_capabilities = 0;
     });
     ui::rerender();
-    cloud_download::catalog(addr)
+    if let Err(e) = cloud_download::catalog(addr) {
+        state::with(|s| s.cloud_notice = e);
+    }
+    // Local service discovery must not wait for a cloud mirror or DeviceInfo.
+    if let Err(e) = modules::connect_device(addr).await {
+        state::with(|s| s.cloud_notice = e);
+    }
+    if state::snapshot().connection_epoch != epoch { return Ok(()); }
+    let reply = match crate::connection::bounded(5000,
+        transport::request(addr.to_string(), vec![8, 2, 16, 2, 34, 0])).await
+        .and_then(|r| r.map_err(|e| format!("读取手环型号失败：{e}"))) {
+        Ok(reply) => reply,
+        Err(e) => { state::with(|s| s.cloud_notice = e); return Ok(()); }
+    };
+    if state::snapshot().addr != addr || state::snapshot().connection_epoch != epoch { return Ok(()); }
+    with(|b| b.device_info = Some(reply));
+    prepare_ready(addr).await
 }
 pub async fn catalog_ready(addr: &str, result: Result<cloud::Catalog, String>) -> Result<(), String> {
     if state::snapshot().addr != addr { return Ok(()); }
-    let catalog = result.map_err(|e| format!("获取云端清单失败，请刷新重试：{e}"))?;
-    prepare(addr, catalog).await?;
+    let catalog = match result {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            state::with(|s| s.cloud_notice = format!("获取云端清单失败，可刷新重试：{e}"));
+            return Ok(());
+        }
+    };
+    with(|b| b.catalog = Some(catalog));
+    prepare_ready(addr).await?;
     ui::rerender();
     Ok(())
 }
-async fn prepare(addr: &str, catalog: cloud::Catalog) -> Result<(), String> {
-    let reply = transport::request(addr.to_string(), vec![8, 2, 16, 2, 34, 0])
-        .await
-        .map_err(|e| format!("读取手环型号失败：{e}"))?;
+async fn prepare_ready(addr: &str) -> Result<(), String> {
+    let Some((reply, catalog)) = with(Bootstrap::take_ready) else { return Ok(()); };
     let target = identify(&reply, &catalog)?;
+    let s = state::snapshot();
+    if !s.resident_target.is_empty() && s.resident_target != target.target {
+        modules::reset_connection();
+        state::with(|s| { s.manager_ready = false; s.manager_busy = false; s.direct = false; });
+        return Err("手环框架与当前固件目标不一致".into());
+    }
     state::with(|s| {
         s.target = target.target.clone();
         s.firmware_sha256 = target.firmware_sha256.clone();
         s.expected_revision = target.loader.version;
         s.cloud_modules = target.modules.clone();
+        s.native_delivery = !s.resident_target.is_empty() && s.resident_capabilities & 1 != 0;
     });
     with(|b| b.candidate = Some(Candidate { addr: addr.into(), target: target.clone(), path: None }));
+    if s.resident_revision != 0 && s.resident_revision < target.loader.version {
+        if s.active || s.installing { return Ok(()); }
+        update_required().await;
+        return Ok(());
+    }
+    if s.manager_ready { return Ok(()); }
     state::with(|s| {
         s.installer_action = None;
         s.connection = Phase::Modules;
@@ -175,7 +226,7 @@ async fn prepare(addr: &str, catalog: cloud::Catalog) -> Result<(), String> {
     // A resident service works with any watchface. Only inspect/open the
     // installer after a real service probe fails; never gate probing on it.
     wait(addr, target, false);
-    modules::connect_device(addr).await?;
+    if !state::snapshot().manager_busy { modules::connect_device(addr).await?; }
     ui::rerender();
     Ok(())
 }
@@ -346,8 +397,6 @@ pub async fn tick() {
                 }
                 Err(e) => state::with(|s| s.status = format!("等待安装器：{e}")),
             }
-        } else {
-            let _ = modules::connect_device(&w.addr).await;
         }
     }
     with(|b| b.polling = false);
@@ -357,6 +406,20 @@ pub async fn tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parallel_discovery_waits_for_both_results_in_either_order() {
+        for catalog_first in [false, true] {
+            let mut b=Bootstrap::default();
+            if catalog_first { b.catalog=Some(cloud::fixture().unwrap()); }
+            else { b.device_info=Some(packet("3.1.35","n66tc")); }
+            assert!(b.take_ready().is_none());
+            if catalog_first { b.device_info=Some(packet("3.1.35","n66tc")); }
+            else { b.catalog=Some(cloud::fixture().unwrap()); }
+            let (reply,catalog)=b.take_ready().unwrap();
+            assert!(identify(&reply,&catalog).is_ok());
+            assert!(b.take_ready().is_none());
+        }
+    }
     #[test]
     fn installer_inspection_waits_for_a_failed_service_probe() {
         let mut w = Waiting { addr: "band".into(), target: cloud::fixture().unwrap().targets.remove(0),

@@ -16,7 +16,7 @@ use md5::{Digest, Md5};
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use waki::{Client, Method};
+use crate::{network, state, ui};
 
 use crate::state::{CloudPlaylist, CloudSong};
 
@@ -204,15 +204,30 @@ struct QrCheckEnvelope {
 
 pub struct PreparedCloud {
     pub path: String,
+    keep: bool,
+}
+impl PreparedCloud {
+    pub fn into_path(mut self) -> String {
+        self.keep=true;
+        std::mem::take(&mut self.path)
+    }
+}
+impl Drop for PreparedCloud {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _=fs::remove_file(&self.path);
+            if let Some(parent)=Path::new(&self.path).parent() { let _=fs::remove_dir(parent); }
+        }
+    }
 }
 
-pub fn search(query: &str, cookie: &str) -> Result<Vec<CloudSong>, String> {
+pub async fn search(query: &str, cookie: &str) -> Result<Vec<CloudSong>, String> {
     let request = eapi(
         "/api/search/get",
         json!({ "s": query, "type": 1, "limit": 20, "offset": 0 }),
         cookie,
     );
-    let bytes = perform(request)?;
+    let bytes = perform(request).await?;
     let value: SearchEnvelope =
         serde_json::from_slice(&bytes).map_err(|error| format!("无法解析搜索结果：{error}"))?;
     if value.code != 200 {
@@ -221,11 +236,11 @@ pub fn search(query: &str, cookie: &str) -> Result<Vec<CloudSong>, String> {
     Ok(value.result.songs.into_iter().map(cloud_song).collect())
 }
 
-pub fn user_playlists(cookie: &str) -> Result<Vec<CloudPlaylist>, String> {
+pub async fn user_playlists(cookie: &str) -> Result<Vec<CloudPlaylist>, String> {
     if cookie.trim().is_empty() {
         return Err("请先扫码登录或填写网易云 Cookie。".to_string());
     }
-    let account_bytes = perform(eapi("/api/nuser/account/get", json!({}), cookie))?;
+    let account_bytes = perform(eapi("/api/nuser/account/get", json!({}), cookie)).await?;
     let account: AccountEnvelope = serde_json::from_slice(&account_bytes)
         .map_err(|error| format!("无法解析网易云账号：{error}"))?;
     if account.code != 200 {
@@ -239,7 +254,7 @@ pub fn user_playlists(cookie: &str) -> Result<Vec<CloudPlaylist>, String> {
         "/api/user/playlist",
         json!({ "uid": uid, "limit": 100, "offset": 0, "includeVideo": true }),
         cookie,
-    ))?;
+    )).await?;
     let value: PlaylistEnvelope =
         serde_json::from_slice(&bytes).map_err(|error| format!("无法解析个人歌单：{error}"))?;
     if value.code != 200 {
@@ -257,12 +272,12 @@ pub fn user_playlists(cookie: &str) -> Result<Vec<CloudPlaylist>, String> {
         .collect())
 }
 
-pub fn playlist_tracks(id: u64, cookie: &str) -> Result<(String, Vec<CloudSong>), String> {
+pub async fn playlist_tracks(id: u64, cookie: &str) -> Result<(String, Vec<CloudSong>), String> {
     let bytes = perform(eapi(
         "/api/v6/playlist/detail",
         json!({ "id": id, "n": 1000, "s": 8 }),
         cookie,
-    ))?;
+    )).await?;
     let value: PlaylistDetailEnvelope =
         serde_json::from_slice(&bytes).map_err(|error| format!("无法解析歌单歌曲：{error}"))?;
     if value.code != 200 {
@@ -286,14 +301,14 @@ fn cloud_song(song: SongWire) -> CloudSong {
     }
 }
 
-pub fn begin_qr_login() -> Result<(String, String), String> {
+pub async fn begin_qr_login() -> Result<(String, String), String> {
     let s_device_id = device_id().to_string();
     let initial_cookie = format!("sDeviceId={s_device_id}");
     let response = perform_response(weapi(
         "/api/login/qrcode/unikey",
         json!({ "type": 1, "noCheckToken": true }),
         &initial_cookie,
-    )?)?;
+    )?).await?;
     let value: QrKeyEnvelope = serde_json::from_slice(&response.body)
         .map_err(|error| format!("无法解析二维码登录响应：{error}"))?;
     if value.code != 200 {
@@ -322,7 +337,7 @@ pub fn begin_qr_login() -> Result<(String, String), String> {
     Ok((key, url))
 }
 
-pub fn poll_qr_login(key: &str) -> Result<Option<String>, String> {
+pub async fn poll_qr_login(key: &str) -> Result<Option<String>, String> {
     let cookie = {
         let session = qr_session().lock().unwrap_or_else(|item| item.into_inner());
         if session.key != key {
@@ -334,7 +349,7 @@ pub fn poll_qr_login(key: &str) -> Result<Option<String>, String> {
         "/api/login/qrcode/client/login",
         json!({ "key": key, "type": 1, "noCheckToken": true }),
         &cookie,
-    )?)?;
+    )?).await?;
     let value: QrCheckEnvelope = serde_json::from_slice(&response.body)
         .map_err(|error| format!("无法解析扫码状态：{error}"))?;
     let mut session = qr_session().lock().unwrap_or_else(|item| item.into_inner());
@@ -359,7 +374,7 @@ pub fn poll_qr_login(key: &str) -> Result<Option<String>, String> {
     }
 }
 
-pub fn prepare(
+pub async fn prepare(
     song: &CloudSong,
     cookie: &str,
     audio_bitrate: u32,
@@ -374,7 +389,7 @@ pub fn prepare(
         "/api/song/enhance/player/url",
         json!({ "ids": format!("[\"{}\"]", song.id), "br": audio_bitrate }),
         cookie,
-    ))?;
+    )).await?;
     let song_url: SongUrlEnvelope = serde_json::from_slice(&song_url_bytes)
         .map_err(|error| format!("无法解析歌曲地址：{error}"))?;
     if song_url.code != 200 {
@@ -396,42 +411,46 @@ pub fn prepare(
 
     fs::create_dir_all(&directory).map_err(|error| format!("无法创建下载目录：{error}"))?;
     let audio_path = directory.join("audio.mp3");
-    if let Err(error) = download(&url, &audio_path, MAX_AUDIO_BYTES) {
+    let mut cleanup = PartialFile(Some(audio_path.clone()));
+    if let Err(error) = download(&url, &audio_path, MAX_AUDIO_BYTES).await {
         let _ = fs::remove_file(&audio_path);
         let _ = fs::remove_dir(&directory);
         return Err(error);
     }
-    Ok(PreparedCloud {
-        path: path_text(&audio_path)?,
-    })
+    let path = path_text(&audio_path)?;
+    cleanup.0 = None;
+    Ok(PreparedCloud { path, keep:false })
 }
 
-fn perform(request: ApiRequest) -> Result<Vec<u8>, String> {
-    perform_response(request).map(|response| response.body)
+async fn perform(request: ApiRequest) -> Result<Vec<u8>, String> {
+    perform_response(request).await.map(|response| response.body)
 }
 /// Optional cloud assets never prevent importing an otherwise playable song.
-pub fn prepare_attachments(song: &CloudSong, cookie: &str, metadata: &mut Value) {
+pub async fn prepare_attachments(song: &CloudSong, cookie: &str, metadata: &mut Value) {
     use crate::attachments;
+    if check_cancel().is_err() { return; }
     let _ = fs::create_dir_all("media/attachments");
     // Search results often omit picUrl. Fetch details before giving up artwork.
     let mut cover_url=song.cover_url.clone();
     if cover_url.is_empty() {
         if let Ok(bytes)=perform(eapi("/api/v3/song/detail",
-            json!({"c":format!("[{{\"id\":{}}}]",song.id)}),cookie)) {
+            json!({"c":format!("[{{\"id\":{}}}]",song.id)}),cookie)).await {
             if let Ok(detail)=serde_json::from_slice::<Value>(&bytes) {
                 cover_url=detail_cover(&detail).into();
             }
         }
     }
+    if check_cancel().is_err() { return; }
     if !cover_url.is_empty() {
         let source=PathBuf::from(format!("media/attachments/{}.jpg",song.id));
         let separator=if cover_url.contains('?') { '&' } else { '?' };
-        if download(&format!("{cover_url}{separator}param=256y256"),&source,512*1024).is_ok() {
+        if download(&format!("{cover_url}{separator}param=256y256"),&source,512*1024).await.is_ok() {
             if let Ok(path)=attachments::cover(&source.to_string_lossy(),song.id) { attachments::add(metadata,path,"cover1"); }
         }
         let _ = fs::remove_file(source);
     }
-    if let Ok(bytes)=perform(eapi("/api/song/lyric",json!({"id":song.id,"lv":-1,"kv":-1,"tv":-1}),cookie)) {
+    if check_cancel().is_err() { return; }
+    if let Ok(bytes)=perform(eapi("/api/song/lyric",json!({"id":song.id,"lv":-1,"kv":-1,"tv":-1}),cookie)).await {
         if bytes.len()<=96*1024 && serde_json::from_slice::<Value>(&bytes).is_ok_and(|v|v["lrc"]["lyric"].as_str().is_some_and(|s|!s.is_empty())) {
             let path=format!("media/attachments/{}.json",song.id);
             if fs::write(&path,bytes).is_ok() { attachments::add(metadata,path,"lyric_json"); }
@@ -444,67 +463,62 @@ fn detail_cover(detail: &Value) -> &str {
         .or_else(||detail["songs"][0]["album"]["picUrl"].as_str()).unwrap_or("")
 }
 
-fn perform_response(request: ApiRequest) -> Result<ApiResponse, String> {
-    let client = Client::new();
-    let mut builder = client.request(Method::Post, &request.url);
-    for (name, value) in request.headers {
-        let name = waki::header::HeaderName::try_from(name.as_str())
-            .map_err(|error| format!("无效 HTTP header：{error}"))?;
-        builder = builder.header(name, value);
-    }
-    let response = builder
-        .body(request.body)
-        .send()
-        .map_err(|error| format!("网易云请求失败：{error}"))?;
-    let status = response.status_code();
-    let cookies = response
-        .headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .map(cookie_pair)
-        .filter(|value| !value.is_empty())
-        .collect();
-    let body = response
-        .body()
-        .map_err(|error| format!("读取网易云响应失败：{error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("网易云 HTTP {status}"));
-    }
-    Ok(ApiResponse { body, cookies })
+async fn perform_response(request: ApiRequest) -> Result<ApiResponse, String> {
+    check_cancel()?;
+    let mut bytes = Vec::new();
+    let response = network::fetch(&request.url, true, &request.headers, request.body, 2 * 1024 * 1024,
+        |chunk| { bytes.extend_from_slice(chunk); Ok(()) }, |_, _, _| check_cancel()).await?;
+    Ok(ApiResponse { body: bytes, cookies: response.cookies })
 }
 
-fn download(url: &str, path: &PathBuf, limit: u64) -> Result<u64, String> {
-    let client = Client::new();
-    let response = client
-        .request(Method::Get, url)
-        .header(waki::header::USER_AGENT, USER_AGENT)
-        .header(waki::header::REFERER, "https://music.163.com/")
-        .header(waki::header::ACCEPT, "audio/mpeg,*/*")
-        .send()
-        .map_err(|error| format!("下载失败：{error}"))?;
-    if !(200..300).contains(&response.status_code()) {
-        return Err(format!("下载 HTTP {}", response.status_code()));
-    }
-    let mut file = File::create(path).map_err(|error| format!("无法创建下载文件：{error}"))?;
-    let mut total = 0u64;
-    while let Some(bytes) = response
-        .chunk(64 * 1024)
-        .map_err(|error| format!("读取下载流失败：{error}"))?
-    {
-        total = total.saturating_add(bytes.len() as u64);
-        if total > limit {
-            let _ = fs::remove_file(path);
-            return Err("下载内容超过导入上限".to_string());
+struct PartialFile(Option<PathBuf>);
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _=fs::remove_file(path);
+            if path.file_name().is_some_and(|name|name=="audio.mp3") {
+                if let Some(parent)=path.parent() { let _=fs::remove_dir(parent); }
+            }
         }
-        file.write_all(&bytes)
-            .map_err(|error| format!("写入下载文件失败：{error}"))?;
     }
-    if total == 0 {
-        let _ = fs::remove_file(path);
-        return Err("下载内容为空".to_string());
+}
+
+fn check_cancel() -> Result<(), String> {
+    if state::with(|s| s.song_job.as_ref().is_some_and(|j| j.network && j.cancel_requested)) {
+        Err("已取消下载".into())
+    } else { Ok(()) }
+}
+
+async fn download(url: &str, path: &PathBuf, limit: u64) -> Result<u64, String> {
+    check_cancel()?;
+    let mut cleanup = PartialFile(Some(path.clone()));
+    let mut file = File::create(path).map_err(|error| format!("无法创建下载文件：{error}"))?;
+    let audio = path.file_name().is_some_and(|name| name == "audio.mp3");
+    let mut received = 0;
+    let mut rendered = std::time::Instant::now();
+    let result = network::fetch(url, false, &[
+        ("User-Agent".into(), USER_AGENT.into()), ("Referer".into(), "https://music.163.com/".into()),
+        ("Accept".into(), "*/*".into())], vec![], limit,
+        |chunk| { file.write_all(chunk).map_err(|e| format!("写入下载文件失败：{e}"))?; received += chunk.len() as u64; Ok(()) },
+        |bytes, total, elapsed| {
+            check_cancel()?;
+            if audio && (rendered.elapsed().as_millis() >= 200 || total == Some(bytes)) {
+                state::with(|s| if let Some(job) = &mut s.song_job {
+                    job.received = bytes; job.total = total;
+                    job.elapsed = elapsed.as_secs();
+                    job.speed = (bytes as f64 / elapsed.as_secs_f64().max(0.01)) as u64;
+                    job.message = "正在下载歌曲".into();
+                });
+                rendered = std::time::Instant::now();
+                ui::rerender();
+            }
+            Ok(())
+        }).await;
+    drop(file);
+    match result {
+        Ok(_) => { cleanup.0=None; Ok(received) },
+        Err(error) => { let _ = fs::remove_file(path); Err(error) }
     }
-    Ok(total)
 }
 
 fn weapi(path: &str, mut data: Value, cookie: &str) -> Result<ApiRequest, String> {

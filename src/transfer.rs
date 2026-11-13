@@ -74,6 +74,12 @@ pub fn reset_connection() {
         s.library.clear();
     });
 }
+pub fn disconnected() {
+    if link(|l| l.upload.is_some() || l.pending.is_some()) {
+        fail("手环已断开，导入未完成，请重新连接后重试".into());
+    }
+    reset_connection();
+}
 
 pub async fn connect_device(addr: &str) -> Result<(), String> {
     if state::snapshot().active {
@@ -101,19 +107,21 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
     if addr.is_empty() {
         return Err("请先在 AstroBox 连接手环".into());
     }
+    let epoch = state::snapshot().connection_epoch;
     ensure_receiver(&addr).await?;
+    if state::snapshot().connection_epoch != epoch { return Ok(()); }
     send_command(1, vec![]).await
 }
 pub async fn ensure_receiver(addr: &str) -> Result<(), String> {
     if !link(|l| l.registered_addrs.iter().any(|a| a == addr)) {
-        register::register_transport_recv(
+        connection::bounded(5000, register::register_transport_recv(
             addr.to_owned(),
             register::TransportRecvFiler {
                 xiaomi_vela_v5_channel_id: 0,
                 xiaomi_vela_v5_protobuf_typeid: 20,
             },
-        )
-        .await
+        ))
+        .await?
         .map_err(|e| format!("注册消息接收失败：{e}"))?;
         link(|l| l.registered_addrs.push(addr.to_owned()));
     }
@@ -152,7 +160,8 @@ pub async fn send_command(op: u8, args: Vec<u8>) -> Result<(), String> {
 // Each request has at most one outstanding host send. A delayed failure from an
 // older ID cannot clear a newer command (responses may arrive during await).
 async fn send_pending(addr: String, id: u32, frame: Vec<u8>) -> Result<(), String> {
-    let result = transport::send(addr, protocol::encode(&frame)).await;
+    let result = connection::bounded(5000, transport::send(addr, protocol::encode(&frame)))
+        .await.and_then(|r| r.map_err(|e| e.to_string()));
     let current = link(|l| {
         let Some(p) = l.pending.as_mut().filter(|p| p.id == id) else {
             return false;
@@ -179,7 +188,7 @@ pub async fn tick() {
         if p.sending {
             return None;
         }
-        if p.since.elapsed().as_secs() > 30 {
+        if p.since.elapsed().as_secs() >= if l.command == 1 { 3 } else { 30 } {
             return Some(Err("手环响应超时，请确认启用了新版蓝牙音乐模块".to_string()));
         }
         // File ACKs are available only on the receive owner. Poll promptly
@@ -273,6 +282,8 @@ pub async fn received(payload: &str) {
         1 => {
             if value["direct"] != true {
                 Err("手环直连协议不匹配".into())
+            } else if !state::with(|s| s.manager_ready && s.modules.iter().any(|m| m.importable())) {
+                Ok(())
             } else {
                 state::with(|s| {
                     s.direct = true;
@@ -338,6 +349,7 @@ pub async fn received(payload: &str) {
                     if assets&1!=0 {"含封面"} else {"无封面"},
                     if assets&2!=0 {"含歌词"} else {"无歌词"});
             });
+            state::with(|s| if let Some(job)=&mut s.song_job { job.message=s.status.clone(); });
             Ok(())
             }
         }
@@ -347,6 +359,7 @@ pub async fn received(payload: &str) {
             state::with(|s| {
                 s.active = false;
                 s.status = "已取消，临时音频已移除".into();
+                if let Some(job)=&mut s.song_job { job.message=s.status.clone(); }
             });
             Ok(())
         }
@@ -528,7 +541,7 @@ fn fail(e: String) {
     let handshake = link(|l| { l.pending = None; l.command == 1 });
     if handshake {
         state::with(|s| s.direct = false);
-        connection::failed(format!("音乐服务连接失败：{e}"));
+        tracing::warn!("music handshake: {e}");
         return;
     }
     cleanup_upload();

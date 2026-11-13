@@ -4,12 +4,14 @@ use std::io::Read;
 
 mod modules;
 mod connection;
+mod deadline;
 mod package;
 mod delivery;
 mod cloud;
 mod cloud_download;
 mod bootstrap;
 mod netease;
+mod network;
 mod attachments;
 mod protocol;
 mod sbc;
@@ -31,6 +33,7 @@ impl lifecycle::Guest for ChemClient {
         state::with(|s| {
             s.cookie = cookie;
         });
+        astrobox::psys_host_v4::timer::set_interval(500, "chem-connection");
         connection::refresh(false).await;
     }
 }
@@ -52,13 +55,13 @@ impl event::Guest for ChemClient {
                     "chem-manager" => modules::tick().await,
                     "chem-bootstrap" => bootstrap::tick().await,
                     "chem-download" => cloud_download::tick().await,
+                    "chem-connection" => connection::tick().await,
                     _ => {}
                 }
                 connection::check_pending().await;
             }
             event::EventType::DeviceAction => {
-                cloud_download::cancel(true);
-                connection::refresh(false).await;
+                connection::device_event().await;
             }
             _ => {}
         }
@@ -71,6 +74,7 @@ impl event::Guest for ChemClient {
     async fn on_ui_render(root: String) {
         // Reopening the UI never waits for permissions, a dialog, or Bluetooth.
         ui::render(&root);
+        connection::opened();
     }
     async fn on_card_render(_: String) {}
 }

@@ -76,6 +76,7 @@ struct Pending {
     sending: bool,
     full_sent: Instant,
     polls: u8,
+    background: bool,
 }
 #[derive(Default)]
 struct Link {
@@ -86,6 +87,7 @@ struct Link {
     rows: Vec<Module>,
     sequence: Option<u32>,
     restarts: u8,
+    resyncs: u8,
 }
 static LINK: OnceLock<Mutex<Link>> = OnceLock::new();
 fn link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
@@ -96,6 +98,18 @@ fn link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
 }
 fn word(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+fn requires_update(revision: u32, expected: u32) -> bool { revision < expected }
+fn resync_sequence(l: &mut Link, horizon: u32) -> bool {
+    if l.resyncs >= 2 || horizon == 0 { return false; }
+    l.resyncs += 1;
+    l.next = horizon;
+    l.reserved = 0;
+    true
+}
+fn sequence_horizon(result: u32, data: &[u8]) -> Option<u32> {
+    if result != 1 || data.len() != 8 || word(data, 0) != Some(0x31515343) { return None; }
+    word(data, 4)
 }
 fn frame(id: u32, op: u32, data: &[u8]) -> Vec<u8> {
     let mut b = vec![0; 36];
@@ -150,6 +164,9 @@ fn next_id_at(l: &mut Link, store: &std::path::Path) -> Result<u32, String> {
     Ok(l.next)
 }
 pub(crate) async fn send(op: u32, data: Vec<u8>) -> Result<(), String> {
+    send_inner(op, data, false).await
+}
+async fn send_inner(op: u32, data: Vec<u8>, background: bool) -> Result<(), String> {
     let bulk = matches!(op, 16 | 27) && state::snapshot().bulk_delivery;
     if data.len() > if bulk { BULK_CHUNK + 4 } else { 512 } {
         return Err("模块请求超过传输上限".into());
@@ -159,6 +176,11 @@ pub(crate) async fn send(op: u32, data: Vec<u8>) -> Result<(), String> {
         return Err("请先选择已连接的手环".into());
     }
     let (id, b) = link(|l| {
+        if !background && l.pending.as_ref().is_some_and(|p| p.background) {
+            l.pending = None;
+            l.rows.clear();
+            l.sequence = None;
+        }
         if l.pending.is_some() {
             return Err("模块操作尚未完成".to_string());
         }
@@ -173,14 +195,16 @@ pub(crate) async fn send(op: u32, data: Vec<u8>) -> Result<(), String> {
             sending: true,
             full_sent: Instant::now(),
             polls: 0,
+            background,
         });
         Ok((id, b))
     })?;
-    state::with(|s| s.manager_busy = true);
+    state::with(|s| s.manager_busy = !background);
     transmit(addr, id, b).await
 }
 async fn transmit(addr: String, id: u32, b: Vec<u8>) -> Result<(), String> {
-    let result = transport::send(addr, protocol::encode_package(PACKAGE, &b)).await;
+    let result = connection::bounded(5000, transport::send(addr, protocol::encode_package(PACKAGE, &b)))
+        .await.and_then(|r| r.map_err(|e| e.to_string()));
     let current = link(|l| {
         if let Some(p) = l.pending.as_mut().filter(|p| p.id == id) {
             p.sending = false;
@@ -207,6 +231,7 @@ fn fail(error: String) {
     state::with(|s| {
         s.manager_busy = false;
         s.manager_ready = false;
+        s.direct = false;
     });
     if crate::delivery::busy() {
         crate::delivery::fail(error.clone());
@@ -230,7 +255,12 @@ pub async fn connect_device(addr: &str) -> Result<(), String> {
     if !s.connected_devices.iter().any(|a| a == addr) {
         return Err("请先在宿主连接手环并刷新设备".into());
     }
-    transfer::ensure_receiver(addr).await?;
+    connection::attempted();
+    state::with(|s| s.manager_busy = true);
+    let receiver = transfer::ensure_receiver(addr).await;
+    if state::snapshot().connection_epoch != s.connection_epoch { return Ok(()); }
+    state::with(|s| s.manager_busy = false);
+    receiver?;
     state::with(|s| {
         if s.addr != addr {
             s.modules.clear();
@@ -266,12 +296,19 @@ pub async fn refresh() -> Result<(), String> {
         l.rows.clear();
         l.sequence = None;
         l.restarts = 0;
+        l.resyncs = 0;
     });
-    send(9, vec![]).await
+    send(9, 0x32534d43u32.to_le_bytes().to_vec()).await
+}
+pub async fn refresh_background() -> Result<(), String> {
+    if link(|l| l.pending.is_some()) { return Ok(()); }
+    connection::attempted();
+    link(|l| { l.rows.clear(); l.sequence = None; l.restarts = 0; l.resyncs = 0; });
+    send_inner(9, 0x32534d43u32.to_le_bytes().to_vec(), true).await
 }
 pub async fn mutate(id: &str, op: u32) -> Result<(), String> {
     let s = state::snapshot();
-    if s.discovering || s.connection.busy() || transfer::busy() {
+    if (s.discovering && !s.manager_ready) || s.connection.busy() {
         return Err("正在准备连接，请稍候".into());
     }
     if s.active || s.installing {
@@ -290,8 +327,9 @@ pub async fn mutate(id: &str, op: u32) -> Result<(), String> {
 pub async fn tick() {
     let pending = link(|l| {
         let p = l.pending.as_mut()?;
-        if p.start.elapsed().as_secs() >= 10 { return Some(Err(())); }
-        let delay = match p.polls { 0 => 25, 1 => 50, _ => 100 };
+        let timeout = if p.op == 9 { 3 } else { 10 };
+        if p.start.elapsed().as_secs() >= timeout { return Some(Err(())); }
+        let delay = match p.polls { 0 => 25, 1 => 50, _ if matches!(p.op, 16 | 27) => 100, 2 => 100, _ => 250 };
         if p.sending || p.sent.elapsed().as_millis() < delay { return None; }
         p.sending = true;
         let b = if p.full_sent.elapsed().as_millis() >= 1000 {
@@ -303,7 +341,7 @@ pub async fn tick() {
         Some(Ok((p.id, b)))
     });
     match pending {
-        Some(Err(())) => fail("10 秒内未收到 Chem 管理服务回复，请确认手环已运行 Chem，或点击刷新重试。".into()),
+        Some(Err(())) => fail("暂未收到 Chem 服务回复，正在重新连接…".into()),
         Some(Ok((id, b))) => { let _ = transmit(state::snapshot().addr, id, b).await; }
         None => {}
     }
@@ -334,15 +372,22 @@ pub async fn received(payload: &str) {
     let Some(b) = protocol::decode_package(&packet, PACKAGE) else {
         return;
     };
-    let pending = link(|l| l.pending.as_ref().map(|p| (p.id, p.op)));
-    let Some((id, op)) = pending else {
+    let pending = link(|l| l.pending.as_ref().map(|p| (p.id, p.op, p.background)));
+    let Some((id, mut op, background)) = pending else {
         return;
     };
-    let Some((result, data)) = parse_response(b, id, op) else {
+    let Some((result, mut data)) = parse_response(b, id, op) else {
         return;
     };
     link(|l| l.pending = None);
     state::with(|s| s.manager_busy = false);
+    if let Some(horizon) = sequence_horizon(result, data).filter(|_| op == 9) {
+        let retry = link(|l| resync_sequence(l, horizon));
+        if retry {
+            if let Err(e) = send_inner(9, 0x32534d43u32.to_le_bytes().to_vec(), background).await { fail(e); }
+        } else { fail("连接序号同步失败，请关闭其他 Chem 客户端后重试".into()); }
+        return;
+    }
     if crate::delivery::busy() {
         crate::delivery::received(op, result, data).await;
         return;
@@ -354,10 +399,14 @@ pub async fn received(payload: &str) {
         return;
     }
     if result != 5 && result != 8 {
-        fail(format!(
+        let error = format!(
             "设备拒绝模块操作（状态 {result}，错误 {}），请刷新检查模块状态",
             word(b, 36).unwrap_or(0) as i32
-        ));
+        );
+        if state::snapshot().manager_ready {
+            state::with(|s| s.status = error);
+            ui::rerender();
+        } else { fail(error); }
         return;
     }
     if op == 19 || op == 20 {
@@ -368,7 +417,7 @@ pub async fn received(payload: &str) {
             if op == 20 { s.status = if s.boot_status & 2 != 0 { "自动启动已开启" } else { "自动启动已关闭" }.into(); }
         });
         if op == 19 {
-            if let Err(e) = send(0x100, 0u32.to_le_bytes().to_vec()).await { fail(e); }
+            if let Err(e) = send_inner(0x100, 0u32.to_le_bytes().to_vec(), background).await { fail(e); }
         }
         ui::rerender(); return;
     }
@@ -380,7 +429,7 @@ pub async fn received(payload: &str) {
             fail("Chem 安装器版本不兼容，请更新后刷新".into());
             return;
         }
-        if word(data, 8) != Some(state::snapshot().expected_revision) {
+        if word(data, 8).is_none_or(|revision| requires_update(revision, state::snapshot().expected_revision)) {
             crate::bootstrap::update_required().await;
             return;
         }
@@ -388,26 +437,38 @@ pub async fn received(payload: &str) {
             let target = String::from_utf8_lossy(&data[32..80])
                 .trim_end_matches('\0')
                 .to_string();
-            if target != state::snapshot().target {
+            if !state::snapshot().target.is_empty() && target != state::snapshot().target {
                 fail("手环框架与当前固件目标不一致".into());
                 return;
             }
             state::with(|s| {
-                s.native_delivery = word(data, 80).unwrap_or(0) & 1 != 0;
+                s.resident_target = target;
+                s.resident_capabilities = word(data, 80).unwrap_or(0);
+                s.native_delivery = !s.firmware_sha256.is_empty() && s.resident_capabilities & 1 != 0;
                 s.bulk_delivery = word(data, 80).unwrap_or(0) & 2 != 0;
             });
         }
         state::with(|s| {
+            s.resident_revision = word(data, 8).unwrap_or(0);
             s.safe_mode = word(data, 12).unwrap_or(0) != 0;
             s.safe_reason = word(data, 20).unwrap_or(0);
         });
-        crate::bootstrap::connected();
-        state::with(|s| s.connection = connection::Phase::Modules);
-        if let Err(e) = send(19, vec![]).await {
-            fail(e);
+        if !background { crate::bootstrap::connected(); }
+        if !background { state::with(|s| s.connection = connection::Phase::Modules); }
+        if word(data, 88) == Some(0x32534d43) {
+            if data.len() < 124 { fail("Chem 连接快照不完整".into()); return; }
+            state::with(|s| {
+                s.boot_status = word(data, 92).unwrap_or(0);
+                s.safe_exit_pending = s.boot_status & 4 != 0;
+            });
+            data = &data[100..];
+            op = 0x100;
+        } else {
+            if let Err(e) = send_inner(19, vec![], background).await { fail(e); }
+            return;
         }
-        return;
-    } else if op == 0x100 {
+    }
+    if op == 0x100 {
         let Some((next, sequence, rows)) = parse_list(data) else {
             fail("模块列表响应格式不匹配".into());
             return;
@@ -421,7 +482,7 @@ pub async fn received(payload: &str) {
                 l.restarts <= 3
             });
             if retry {
-                if let Err(e) = send(0x100, 0u32.to_le_bytes().to_vec()).await {
+                if let Err(e) = send_inner(0x100, 0u32.to_le_bytes().to_vec(), background).await {
                     fail(e);
                 }
                 return;
@@ -448,7 +509,7 @@ pub async fn received(payload: &str) {
             return;
         }
         if next != u32::MAX {
-            if let Err(e) = send(0x100, next.to_le_bytes().to_vec()).await {
+            if let Err(e) = send_inner(0x100, next.to_le_bytes().to_vec(), background).await {
                 fail(e);
             }
             return;
@@ -513,6 +574,66 @@ fn parse_list(b: &[u8]) -> Option<(u32, u32, Vec<Module>)> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lost_sequence_recovers_durably_across_wrap_and_is_bounded() {
+        let hint=[0x43,0x53,0x51,0x31,0x50,0xc3,0,0];
+        assert_eq!(sequence_horizon(1,&hint),Some(50000));
+        assert!(sequence_horizon(0,&hint).is_none());
+        assert!(sequence_horizon(5,&hint).is_none());
+        assert!(sequence_horizon(1,&hint[..7]).is_none());
+        let store=std::env::temp_dir().join(format!("chem-resync-{}",std::process::id()));
+        for horizon in [50000,u32::MAX] {
+            let mut l=Link::default();
+            assert!(resync_sequence(&mut l,horizon));
+            let next=next_id_at(&mut l,&store).unwrap();
+            assert!(next!=0 && next!=horizon && next.wrapping_sub(horizon)<0x80000000);
+            let mut reloaded=Link::default();
+            assert_ne!(next_id_at(&mut reloaded,&store).unwrap(),next);
+            assert!(resync_sequence(&mut l,horizon));
+            assert!(!resync_sequence(&mut l,horizon));
+        }
+        std::fs::remove_file(store).unwrap();
+    }
+    #[test]
+    fn session_snapshot_connects_without_catalog_and_ignores_stale_replies() {
+        use std::{future::Future, task::{Context, Poll, Waker}};
+        fn complete(future: impl Future<Output=()>) {
+            assert!(matches!(std::pin::pin!(future).as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(())));
+        }
+        let mut payload=vec![0;124];
+        for (at,n) in [(0,0x43514431u32),(4,124),(8,0x26111303),(12,1),(20,2),
+            (80,3),(84,1),(88,0x32534d43),(92,7),(100,0x31534d43),(104,80),(108,u32::MAX),(112,4)] {
+            payload[at..at+4].copy_from_slice(&n.to_le_bytes());
+        }
+        let target=b"xiaomi-band-9-3.1.35";
+        payload[32..32+target.len()].copy_from_slice(target);
+        let mut wire=vec![0;36];
+        for (at,n) in [(0,0x43504332u32),(12,160),(16,9),(20,123),(28,5),(32,124)] {
+            wire[at..at+4].copy_from_slice(&n.to_le_bytes());
+        }
+        wire[4..12].copy_from_slice(&[36,0,2,0,2,0,0,0]);
+        wire.extend(payload);
+        let packet=STANDARD.encode(protocol::encode_package(PACKAGE,&wire));
+        state::with(|s| *s=state::State { addr:"test".into(),manager_busy:true,..Default::default() });
+        link(|l| l.pending=Some(Pending { id:124,op:9,frame:vec![],start:Instant::now(),sent:Instant::now(),sending:false,full_sent:Instant::now(),polls:0,background:false }));
+        complete(received(&packet));
+        assert!(!state::snapshot().manager_ready);
+        link(|l| l.pending.as_mut().unwrap().id=123);
+        complete(received(&packet));
+        let s=state::snapshot();
+        assert!(s.manager_ready && !s.manager_busy && s.safe_mode && s.safe_exit_pending);
+        assert_eq!(s.connection,connection::Phase::Ready);
+        assert_eq!(s.resident_revision,0x26111303);
+        assert!(s.modules.is_empty() && !s.native_delivery && s.firmware_sha256.is_empty());
+        assert!(link(|l| l.pending.is_none()));
+        state::with(|s| *s=state::State::default());
+    }
+    #[test]
+    fn newer_resident_build_is_not_an_update_requirement() {
+        assert!(super::requires_update(0x26111301,0x26111302));
+        assert!(!super::requires_update(0x26111302,0x26111302));
+        assert!(!super::requires_update(0x26111303,0x26111302));
+    }
     use super::*;
     // Wire bytes from chem_transport_v2_encode_response (SDK ABI 2.0),
     // independent of this client's request encoder. Empty registry page.
@@ -605,7 +726,7 @@ mod tests {
 
 pub async fn set_boot(enabled: bool) -> Result<(), String> {
     let s = state::snapshot();
-    if !s.manager_ready || s.manager_busy || s.active || s.installing || s.download.is_some() || transfer::busy() {
+    if !s.manager_ready || s.manager_busy || s.active || s.installing || s.downloading_artifact() {
         return Err("请先完成当前操作并连接管理器".into());
     }
     if s.boot_status & 1 == 0 { return Err("当前固件不支持自动启动".into()); }

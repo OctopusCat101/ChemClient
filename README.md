@@ -1,6 +1,6 @@
 # ChemClient
 
-ChemClient 1.7.18 is the Chem module manager and NoirMusic importer for API 4 / WASI 2.
+ChemClient 1.7.23 is the Chem module manager and NoirMusic importer for API 4 / WASI 2.
 Select an installed module to open its content uploader directly. The enable switch,
 Delete and available Update icons share one compact row beside the module.
 Normal rows show only the module name and controls. Delete uses a static trash
@@ -16,7 +16,7 @@ interface. Local upload starts with file selection and one Import action;
 quality, cover and lyrics are grouped under the optional import settings.
 
 The independent `com.chem.manager` bridge currently supports Band 9 / 3.1.35.
-Run Chem once on the wearable. Loader build 0x26111205 processes management on
+Run Chem once on the wearable. Loader build 0x26111303 processes management on
 the existing resident owner loop, including when LVGL screen refresh stops.
 Startup probes the resident service before inspecting or opening the installer;
 a working service does not require the Chem watchface to be current.
@@ -31,7 +31,7 @@ The connection panel disappears once the module registry is connected, and
 background catalog checks do not display progress cards.
 Bulk file writes use a separate bounded 16 KiB buffer; CPC2 control payloads stay
 limited to 512 bytes. A 12-byte ID/op poll retrieves cached replies on the receive
-owner, with 25/50/100 ms backoff and full-request retry after one second if needed.
+owner, with 25/50/100 ms backoff (250 ms when waiting on control replies) and full-request retry after one second if needed.
 Writes stay ordered on the resident owner, retaining signed size/hash validation,
 duplicate suppression and safe-mode guards. Request IDs are reserved durably in
 ranges of 4096, and upload UI rendering is limited to once per 400 ms.
@@ -77,6 +77,23 @@ resolve plugin-relative paths before passing them to the frontend. See the
 Changing this plugin's progress display cannot repair that host panic.
 
 Optional local artwork/LRC and automatic NetEase artwork/lyrics are supported.
+NetEase HTTP waits use the API 4 runtime's native WASI 0.3 async clock, so they
+do not depend on Astro timer callbacks waking a different component task.
+Ready data is drained in bounded turns without a fixed delay between batches.
+Request/header/completion timings are logged as `[chem:http:N]` without cookies
+or URL query values. The native host API remains Level 4; Rust std and HTTP
+streams still use WASI 2, alongside the async clock already provided by Astro.
+The runtime test builds the production HTTP source into a WASM component and
+checks delayed responses, concurrent heartbeat, streaming POST/cookies, 16 MiB
+download, redirects, chunked/truncated bodies, limits, keepalive and cancellation:
+
+    python tests/check_network_runtime.py --wasmtime PATH_TO_WASMTIME_48
+    python tests/check_network_runtime.py --wasmtime PATH_TO_WASMTIME_48 --netease
+
+The second command additionally times four anonymous EAPI calls. It does not
+read saved account credentials. Results are runtime/network checks, not a
+physical Astro UI or mobile network acceptance test.
+
 Version 1.5.0 generates real 160x160 wearable artwork, independently of audio
 quality. Importing covers requires NoirMusic 0.4.50 / code82 or later.
 Only 160x160 covers are supported; previously imported 96x96 covers must be reimported.
@@ -210,3 +227,15 @@ sequentially with durable acknowledgements, so a full song is never in memory.
 Audio settings retain stereo at24kHz for all three compressed levels:24kbps
 (about0.18MB/min),48kbps (0.36MB/min),80kbps (0.60MB/min). Original skips MP3
 compression; optional SBC conversion always follows the chosen audio stage.
+
+Connection revision 1.7.23 / loader 0x26111303 starts the local service handshake
+without waiting for the cloud catalog or DeviceInfo. The catalog still refreshes
+from the server each time, and signed module import waits for exact identity
+validation. A CMS2 query returns device, boot and up to four module rows in one
+reply; further rows remain paginated. Ordinary queries retain their original
+wire size. CSQ1 repairs a lost client sequence without resetting the wearable's
+mutation replay protection. API calls have cooperative deadlines; failed service
+and music handshakes retry independently. Idle session refreshes keep controls
+available and yield to user operations; reconnects invalidate old requests.
+The wearable joins an existing resident owner directly, preserving screen-off
+startup, Flash checks, safe mode and stability observation.

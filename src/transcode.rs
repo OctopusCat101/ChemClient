@@ -253,6 +253,7 @@ pub fn cancel() -> bool {
         s.transcoding = false;
         s.active = false;
         s.status = "已取消压缩".into();
+        if let Some(job)=&mut s.song_job { job.message=s.status.clone(); }
     });
     true
 }

@@ -1,0 +1,5 @@
+package chem:network-check;
+world network-check {
+  import wasi:clocks/monotonic-clock@0.3.0;
+  export wasi:cli/run@0.3.0;
+}

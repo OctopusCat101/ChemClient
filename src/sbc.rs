@@ -95,6 +95,7 @@ pub fn cancel() -> bool {
         s.active = false;
         s.transcoding = false;
         s.status = "已取消预解码".into();
+        if let Some(job)=&mut s.song_job { job.message=s.status.clone(); }
     });
     true
 }

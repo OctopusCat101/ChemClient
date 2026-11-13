@@ -20,6 +20,11 @@ const SURFACE: &str = "#000000";
 const CARD: &str = "#1C211F";
 thread_local! {
     static UI_NODES: RefCell<HashMap<String, ui::Element>> = RefCell::new(HashMap::new());
+    static UI_POSITION: RefCell<u32> = const { RefCell::new(0) };
+}
+fn layout_node(kind: ui::ElementType, content: Option<&str>) -> ui::Element {
+    let position=UI_POSITION.with(|p| { let mut p=p.borrow_mut(); *p+=1; *p });
+    stable_node(kind,content,&format!("layout:{position}:{kind:?}"))
 }
 // Host builders clone borrowed elements with their ID intact. Cache childless
 // prototypes so refreshing keeps node identity without accumulating children.
@@ -53,8 +58,7 @@ fn text(s: &str, size: u32, color: &str) -> ui::Element {
         }
         wrapped.push(ch);
     }
-    ui::Element::new(ui::ElementType::P, Some(&wrapped))
-        .without_default_styles()
+    layout_node(ui::ElementType::P, Some(&wrapped))
         .size(size)
         .text_color(color)
         .width_full()
@@ -62,8 +66,7 @@ fn text(s: &str, size: u32, color: &str) -> ui::Element {
         .margin(0)
 }
 fn column() -> ui::Element {
-    ui::Element::new(ui::ElementType::Div, None)
-        .without_default_styles()
+    layout_node(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .gap(16)
@@ -103,13 +106,14 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
         .flex_shrink(0.0)
         .prop("key", event)
         .on(ui::Event::Click, event);
-    disabled(
-        el,
-        (state::action_busy() || state::snapshot().installing || state::snapshot().download.is_some())
-            && event != "cancel"
-            && !event.starts_with("tab:")
-            && !event.starts_with("quality:"),
-    )
+    disabled(el, button_blocked(&state::snapshot(), event))
+}
+fn independent_action(event: &str) -> bool {
+    event == "cancel" || event == "predecode" || event == "upload-options"
+        || event.starts_with("tab:") || event.starts_with("quality:") || event.starts_with("module:")
+}
+fn button_blocked(s: &state::State, event: &str) -> bool {
+    !s.pending_action.is_empty() && !independent_action(event)
 }
 fn toggle_switch(key: &str, label: &str, event: &str, enabled: bool, busy: bool) -> ui::Element {
     let track=fixed_box(stable_node(ui::ElementType::Button,None,key),52,32)
@@ -129,8 +133,7 @@ fn module_switch(module: &modules::Module, busy: bool) -> ui::Element {
         &format!("module-toggle:{}",module.id), module.intent==1, busy||module.intent==2)
 }
 fn input(label: &str, value: &str, event: &str) -> ui::Element {
-    ui::Element::new(ui::ElementType::Input, None)
-        .without_default_styles()
+    stable_node(ui::ElementType::Input, None, &format!("input:{event}"))
         .width_full()
         .min_height(56)
         .size(16)
@@ -153,18 +156,18 @@ fn card() -> ui::Element {
 }
 fn image(src: &str, size: u32) -> ui::Element {
     // API3 hosts consume image content; src is also set for hosts supporting props.
-    ui::Element::new(ui::ElementType::Image, Some(src))
+    layout_node(ui::ElementType::Image, Some(src))
         .prop("src", src)
         .width(size)
         .height(size)
         .flex_shrink(0.0)
 }
 fn disabled(el: ui::Element, yes: bool) -> ui::Element {
-    if yes { el.disabled().opacity(0.48) } else { el }
+    if yes { el.disabled().prop("aria-disabled","true").opacity(0.48) }
+    else { el.prop("aria-disabled","false").opacity(1.0) }
 }
 fn row() -> ui::Element {
-    ui::Element::new(ui::ElementType::Div, None)
-        .without_default_styles()
+    layout_node(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
         .gap(12)
@@ -172,7 +175,7 @@ fn row() -> ui::Element {
         .min_width(0)
 }
 fn module_busy(s: &state::State) -> bool {
-    s.manager_busy || s.installing || s.download.is_some() || s.active || s.connection.busy() || !s.manager_ready
+    s.manager_busy || s.installing || s.downloading_artifact() || s.active || s.connection.busy() || !s.manager_ready
 }
 fn uploader_tab(s: &state::State, id: &str) -> &'static str {
     if s.modules.iter().any(|m| m.id == id && m.music() && m.importable()) && s.direct && !s.connection.busy() {
@@ -186,16 +189,16 @@ fn icon_button(path: &str, label: &str, event: &str, accent: bool) -> ui::Elemen
     let icon=fixed_box(stable_node(ui::ElementType::Image,Some(&src),&format!("icon:{event}")),20,20)
         .prop("src",&src).prop("width","20").prop("height","20")
         .prop("alt","").prop("aria-hidden","true").prop("draggable","false");
-    disabled(fixed_box(stable_node(ui::ElementType::Button,None,event),40,40)
+    fixed_box(stable_node(ui::ElementType::Button,None,event),40,40)
         .padding(0).margin(0).radius(20).border(0,"transparent").bg("transparent")
         .flex().flex_direction(ui::FlexDirection::Row).align_center().justify_center()
         .prop("aria-label",label).prop("title",label)
-        .on(ui::Event::Click,event).child(icon),state::action_busy())
+        .on(ui::Event::Click,event).child(icon)
 }
 const DELETE_ICON: &str = "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z";
 const UPDATE_ICON: &str = "M4 12l1.41 1.41L11 7.83V20h2V7.83l5.59 5.58L20 12l-8-8-8 8z";
 fn module_controls(s: &state::State, m: &modules::Module) -> ui::Element {
-    let busy = module_busy(s);
+    let busy = module_busy(s) || !s.pending_action.is_empty();
     let update_available=s.cloud_modules.iter().any(|c|c.id==m.id && c.version>m.version);
     let update_label=if update_available {format!("更新 {}",m.name())} else {format!("{}：暂无可用更新",m.name())};
     let update=disabled(icon_button(UPDATE_ICON,&update_label,&format!("module-install:{}",m.id),update_available),
@@ -223,6 +226,52 @@ fn module_activity(mut card: ui::Element, s: &state::State, id: &str) -> ui::Ele
     }
     card
 }
+fn song_activity(mut card: ui::Element, s: &state::State, id: u64) -> ui::Element {
+    let Some(job) = s.song_job.as_ref().filter(|j|j.id==id) else { return card; };
+    let running = job.network || s.active;
+    let (bytes, total, speed) = if job.network { (job.received, job.total, job.speed) }
+        else { (s.sent, (s.total>0).then_some(s.total), s.speed) };
+    let message = if !job.network && s.active {
+        if s.transcoding { "正在处理音频" } else { "正在上传手环" }
+    } else { &job.message };
+    card = card.child(text(message,14,MUTED));
+    if running {
+        if let Some(total) = total.filter(|n|*n>0) {
+            let percent = (bytes.saturating_mul(100)/total).min(100);
+            card = card.child(progress_bar(percent)).child(text(&format!("{percent}% · {:.1} / {:.1} MB · {:.0} KB/s",
+                bytes as f64/1048576.0,total as f64/1048576.0,speed as f64/1024.0),13,MUTED));
+        } else if bytes > 0 {
+            card = card.child(text(&format!("已下载 {:.1} MB · {:.0} KB/s",bytes as f64/1048576.0,speed as f64/1024.0),13,MUTED));
+        }
+        card = card.child(button("取消","cancel",false));
+    }
+    card
+}
+
+struct CloudMetadata(Value);
+impl Drop for CloudMetadata {
+    fn drop(&mut self) { attachments::cleanup(&self.0); }
+}
+async fn import_cloud_song(song: &state::CloudSong, s: &state::State) -> Result<(), String> {
+    let prepared = netease::prepare(song, &s.cookie, if s.bitrate == 0 {320000} else {192000}).await?;
+    let mut meta = CloudMetadata(json!({"id":song.id,"name":song.name,"artists":song.artists.iter().map(|a|json!({"name":a})).collect::<Vec<_>>(),
+        "album":{"id":song.album_id,"name":song.album},"duration_ms":song.duration_ms}));
+    if s.attachments_supported {
+        state::with(|s|if let Some(job)=&mut s.song_job { job.message="正在获取封面与歌词…".into(); });
+        rerender();
+        netease::prepare_attachments(song,&s.cookie,&mut meta.0).await;
+    }
+    let current=state::snapshot();
+    let cancelled=current.song_job.as_ref().is_none_or(|j|j.cancel_requested);
+    if cancelled || current.addr!=s.addr || !current.direct {
+        return Err(if cancelled { "已取消下载" } else { "手环连接已变化，请重新导入" }.into());
+    }
+    state::with(|s|if let Some(job)=&mut s.song_job { job.network=false; });
+    let path=prepared.path.clone();
+    let result=transcode::start(prepared.into_path(),std::mem::take(&mut meta.0),true,s.bitrate).await;
+    if result.is_err() { let _=fs::remove_file(&path); }
+    result
+}
 pub fn rerender() {
     let s = state::snapshot();
     if let Some(root) = s.root.as_deref() {
@@ -230,6 +279,7 @@ pub fn rerender() {
     }
 }
 pub fn render(root: &str) {
+    UI_NODES.with(|nodes| nodes.borrow_mut().clear());
     state::with(|s| s.root = Some(root.into()));
     rerender();
 }
@@ -239,6 +289,38 @@ fn connection_panel_visible(s: &state::State) -> bool {
 #[cfg(test)]
 mod connection_visibility_tests {
     use super::*;
+    #[test]
+    fn only_pending_operations_disable_buttons_and_navigation_stays_usable() {
+        let mut s=state::State::default();
+        assert!(!button_blocked(&s,"search"));
+        s.pending_action="search".into();
+        assert!(button_blocked(&s,"search"));
+        assert!(button_blocked(&s,"cloud:7"));
+        for event in ["tab:modules","module:bluetooth_audio","cancel","upload-options"] {
+            assert!(!button_blocked(&s,event));
+        }
+        s.pending_action.clear();
+        assert!(!button_blocked(&s,"search"));
+    }
+    #[test]
+    fn pending_module_action_does_not_block_itself() {
+        let mut s=state::State::default();
+        s.manager_ready=true;
+        s.connection=connection::Phase::Ready;
+        s.pending_action="boot-toggle".into();
+        assert!(!module_busy(&s));
+        assert!(button_blocked(&s,"module-delete:music"));
+        s.manager_busy=true;
+        assert!(module_busy(&s));
+    }
+    #[test]
+    fn catalog_lookup_does_not_disable_a_connected_manager() {
+        let mut s=state::State { manager_ready:true, connection:connection::Phase::Ready, ..Default::default() };
+        s.download=Some(cloud_download::Progress { owner:cloud_download::Owner::Catalog,label:String::new(),received:0,total:None,elapsed:0,connecting:true });
+        assert!(!module_busy(&s) && !s.downloading_artifact());
+        s.download.as_mut().unwrap().owner=cloud_download::Owner::Loader;
+        assert!(module_busy(&s) && s.downloading_artifact());
+    }
     #[test]
     fn module_entry_opens_uploader_only_for_a_ready_supported_module() {
         let mut s = state::State::default();
@@ -255,7 +337,7 @@ mod connection_visibility_tests {
         let mut s = state::State::default();
         assert!(connection_panel_visible(&s));
         s.manager_ready = true;
-        for phase in [connection::Phase::Ready, connection::Phase::Modules, connection::Phase::Music] {
+        for phase in [connection::Phase::Ready, connection::Phase::Modules] {
             s.connection = phase;
             s.installing = true;
             assert!(!connection_panel_visible(&s));
@@ -265,6 +347,7 @@ mod connection_visibility_tests {
     }
 }
 fn build(s: &state::State) -> ui::Element {
+    UI_POSITION.with(|p|*p.borrow_mut()=0);
     // No fixed content width or duplicate app hero: the host already owns its title.
     let mut root = stable_node(ui::ElementType::Div,None,"chem-root")
         .flex().flex_direction(ui::FlexDirection::Column).min_width(0)
@@ -280,14 +363,13 @@ fn build(s: &state::State) -> ui::Element {
         connection::Phase::Checking => "正在检查连接…",
         connection::Phase::Modules => "正在读取模块…",
         connection::Phase::Installer(message) => message,
-        connection::Phase::Music => "正在准备音乐导入…",
         connection::Phase::Ready => if s.device_name.is_empty() { "手环已连接" } else { &s.device_name },
         connection::Phase::Failed(message) => message,
     };
     let mut connection_bar = row().child(equal(text(connection_text, 14, MUTED)));
     if !s.connection.busy() {
         connection_bar = connection_bar.child(disabled(
-            button("刷新", "refresh", false).width(88),
+            button("刷新", "refresh-connection", false).width(88),
             s.active || s.installing || s.manager_busy || s.download.is_some() || transfer::busy(),
         ));
     }
@@ -319,7 +401,12 @@ fn build(s: &state::State) -> ui::Element {
             if s.direct { "#B5F2C7" } else { MUTED },
         ));
     }
-    if s.active {
+    if let Some(job) = &s.song_job {
+        if s.tab != "cloud" || !s.results.iter().any(|song|song.id==job.id) {
+            root = root.child(song_activity(card().child(text(&job.name,18,INK)),s,job.id));
+        }
+    }
+    if s.active && s.song_job.is_none() {
         let progress = if s.total == 0 {
             0
         } else {
@@ -389,7 +476,8 @@ fn build(s: &state::State) -> ui::Element {
         "modules" => {
             root=root.child(row().child(equal(text("模块管理",28,INK)))
                 .child(disabled(button("刷新","refresh",false).width(72),s.installing||s.manager_busy||s.active||s.download.is_some()))
-                .child(disabled(button("导入 .chem","module-import",true).width(128),!s.manager_ready||!s.native_delivery||s.manager_busy||s.installing||s.active||s.download.is_some()||s.connection.busy())));
+                .child(disabled(button("导入 .chem","module-import",true).width(128),!s.manager_ready||!s.native_delivery||s.manager_busy||s.installing||s.active||s.downloading_artifact()||s.connection.busy())));
+            if !s.cloud_notice.is_empty() { root = root.child(text(&s.cloud_notice,14,MUTED)); }
             if s.manager_ready && s.boot_status & 1 != 0 {
                 let enabled = s.boot_status & 2 != 0;
                 root = root.child(stable_node(ui::ElementType::Div,None,"boot-panel")
@@ -439,7 +527,7 @@ fn build(s: &state::State) -> ui::Element {
             for m in s.cloud_modules.iter().filter(|c|!s.modules.iter().any(|m|m.id==c.id)) {
                 root=root.child(module_activity(card().child(row().child(equal(column().gap(6).child(text(&m.name,20,INK))
                     .child(text(&format!("{} · 未安装",m.version_name),13,MUTED))))
-                    .child(disabled(button("安装",&format!("module-install:{}",m.id),true).width(80),!s.manager_ready||!s.native_delivery||s.manager_busy||s.installing||s.download.is_some()||s.active||s.connection.busy()))),s,&m.id));
+                    .child(disabled(button("安装",&format!("module-install:{}",m.id),true).width(80),!s.manager_ready||!s.native_delivery||s.manager_busy||s.installing||s.downloading_artifact()||s.active||s.connection.busy()))),s,&m.id));
             }
             // Locally imported modules have no cloud card until the device
             // registry refreshes. Keep their progress visible during upload.
@@ -511,7 +599,7 @@ fn build(s: &state::State) -> ui::Element {
                         )),
                 );
             }
-            for (i, song) in s.results.iter().enumerate() {
+            for song in &s.results {
                 let mut title = column()
                     .flex_grow(1.0)
                     .child(text(&song.name, 18, INK))
@@ -521,10 +609,10 @@ fn build(s: &state::State) -> ui::Element {
                         .child(image(&song.cover_url, 44).radius(12))
                         .child(title);
                 }
-                root = root.child(card().child(title).child(disabled(
-                    button("导入手环", &format!("cloud:{i}"), true),
-                    s.active || !s.direct,
-                )));
+                root = root.child(song_activity(card().child(title).child(disabled(
+                    button("导入手环", &format!("cloud:{}",song.id), true),
+                    s.active || !s.direct || s.song_job.as_ref().is_some_and(|j|j.network),
+                )), s, song.id));
             }
         }
         "library" => {
@@ -655,7 +743,7 @@ pub async fn event(id: &str, payload: &str) {
         _ => {}
     }
     // Navigation and editing remain responsive while a dialog/host call awaits.
-    if id.starts_with("tab:") || id.starts_with("quality:") || id == "predecode" || id == "cancel" {
+    if independent_action(id) {
         if let Err(e) = action(id, &value).await {
             state::with(|s| s.status = e);
         }
@@ -665,7 +753,8 @@ pub async fn event(id: &str, payload: &str) {
     let Some(guard) = state::try_action() else {
         return;
     };
-    rerender();
+    state::with(|s| s.pending_action = id.into());
+    if matches!(id,"search"|"playlists"|"login"|"login-check") || id.starts_with("playlist:") { rerender(); }
     let result = action(id, &value).await;
     if let Err(e) = result {
         // A rejected UI action must not clear a live transfer's active state.
@@ -673,14 +762,15 @@ pub async fn event(id: &str, payload: &str) {
             if let Some(module) = id.strip_prefix("module-install:") {
                 let name = s.cloud_modules.iter().find(|m|m.id==module).map(|m|m.name.clone()).unwrap_or_else(|| module.into());
                 s.module_message(module, &name, &e);
-            } else { s.status = e; }
+            } else if !id.starts_with("cloud:") { s.status = e; }
         });
     }
+    state::with(|s| s.pending_action.clear());
     drop(guard);
     rerender();
 }
 async fn action(id: &str, _value: &str) -> Result<(), String> {
-    if cloud_download::busy() && id != "cancel" && !id.starts_with("tab:") && !id.starts_with("quality:") {
+    if state::snapshot().downloading_artifact() && id != "cancel" && !id.starts_with("tab:") && !id.starts_with("quality:") {
         return Err("请先完成或取消下载".into());
     }
     if id == "boot-toggle" || id.starts_with("safe-exit:") {
@@ -706,7 +796,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         return if id == "boot-toggle" { modules::set_boot(s.boot_status & 2 == 0).await }
             else { modules::exit_safe_mode(id.trim_start_matches("safe-exit:").parse().map_err(|_| "无效的恢复操作")?).await };
     }
-    if id=="refresh" { connection::refresh(true).await; return Ok(()); }
+    if matches!(id,"refresh"|"refresh-connection") { connection::refresh(true).await; return Ok(()); }
     if id == "loader-install" { return bootstrap::install().await; }
     if let Some(module)=id.strip_prefix("module-install:") {
         let s=state::snapshot();
@@ -779,7 +869,12 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         return Ok(());
     }
     if id == "cancel" {
-        if cloud_download::busy() { cloud_download::cancel(false); return Ok(()); }
+        if state::with(|s| {
+            if let Some(job) = s.song_job.as_mut().filter(|j|j.network) {
+                job.cancel_requested = true; job.message = "正在取消下载…".into(); true
+            } else { false }
+        }) { return Ok(()); }
+        if state::snapshot().downloading_artifact() { cloud_download::cancel(false); return Ok(()); }
         if delivery::busy(){return delivery::cancel().await;}
         if transcode::cancel() {
             return Ok(());
@@ -837,6 +932,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             Ok(())
         }
         "upload" => {
+            state::with(|s| s.song_job = None);
             let s = state::snapshot();
             if s.local_name.trim().is_empty() {
                 return Err("请输入曲名".into());
@@ -874,7 +970,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             }
             state::with(|s| s.status = "正在搜索音乐".into());
             rerender();
-            let rows = netease::search(&s.query, &s.cookie)?;
+            let rows = netease::search(&s.query, &s.cookie).await?;
             state::with(|s| {
                 s.results = rows;
                 s.playlists.clear();
@@ -884,7 +980,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         }
         "playlists" => {
             let s = state::snapshot();
-            let rows = netease::user_playlists(&s.cookie)?;
+            let rows = netease::user_playlists(&s.cookie).await?;
             state::with(|s| {
                 s.playlists = rows;
                 s.results.clear();
@@ -893,7 +989,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             Ok(())
         }
         "login" => {
-            let (key, url) = netease::begin_qr_login()?;
+            let (key, url) = netease::begin_qr_login().await?;
             state::with(|s| {
                 s.qr_key = key;
                 s.qr_url = url;
@@ -903,7 +999,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         }
         "login-check" => {
             let key = state::snapshot().qr_key;
-            match netease::poll_qr_login(&key)? {
+            match netease::poll_qr_login(&key).await? {
                 Some(cookie) => {
                     fs::create_dir_all("data").map_err(|e| e.to_string())?;
                     fs::write("data/netease.cookie", &cookie).map_err(|e| e.to_string())?;
@@ -930,27 +1026,25 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             Ok(())
         }
         _ => {
-            if let Some(i) = id
-                .strip_prefix("cloud:")
-                .and_then(|v| v.parse::<usize>().ok())
-            {
+            if let Some(song_id) = id.strip_prefix("cloud:").and_then(|v| v.parse::<u64>().ok()) {
                 let s = state::snapshot();
-                let song = s.results.get(i).ok_or("歌曲已失效，请重新搜索")?;
-                state::with(|s| s.status = "正在下载音乐到手机".into());
+                if !s.direct { return Err("请先连接 NoirMusic".into()); }
+                let song = s.results.iter().find(|song|song.id==song_id).ok_or("歌曲已失效，请重新搜索")?;
+                state::with(|s| {
+                    s.song_job = Some(state::SongJob { id:song.id, name:song.name.clone(), network:true,
+                        message:"正在获取歌曲地址…".into(), ..Default::default() });
+                    s.status.clear();
+                });
                 rerender();
-                let prepared = netease::prepare(song, &s.cookie, if s.bitrate == 0 {320000} else {192000})?;
-                let mut meta = json!({"id":song.id,"name":song.name,"artists":song.artists.iter().map(|a|json!({"name":a})).collect::<Vec<_>>(),"album":{"id":song.album_id,"name":song.album},"duration_ms":song.duration_ms});
-                if s.attachments_supported { netease::prepare_attachments(song,&s.cookie,&mut meta); }
-                let path = prepared.path.clone();
-                let result = transcode::start(prepared.path, meta, true, s.bitrate).await;
-                if result.is_err() {
-                    let _ = fs::remove_file(path);
-                }
+                let result = import_cloud_song(song, &s).await;
+                if let Err(error) = &result { state::with(|s| if let Some(job)=&mut s.song_job {
+                    job.network=false; job.message=error.clone();
+                }); }
                 return result;
             }
             if let Some(id) = id.strip_prefix("playlist:").and_then(|v| v.parse().ok()) {
                 let s = state::snapshot();
-                let (name, tracks) = netease::playlist_tracks(id, &s.cookie)?;
+                let (name, tracks) = netease::playlist_tracks(id, &s.cookie).await?;
                 state::with(|s| {
                     s.results = tracks;
                     s.playlists.clear();

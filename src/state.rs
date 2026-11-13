@@ -17,6 +17,13 @@ pub fn action_busy() -> bool {
 }
 impl Drop for ActionGuard {
     fn drop(&mut self) {
+        with(|s| {
+            s.pending_action.clear();
+            if let Some(job) = s.song_job.as_mut().filter(|j|j.network) {
+                job.network = false;
+                job.message = "下载已中断，可重新导入".into();
+            }
+        });
         ACTION_BUSY.store(false, Ordering::Release);
     }
 }
@@ -45,9 +52,22 @@ pub struct ModuleJob {
     pub message: String,
 }
 #[derive(Clone, Default)]
+pub struct SongJob {
+    pub id: u64,
+    pub name: String,
+    pub received: u64,
+    pub total: Option<u64>,
+    pub speed: u64,
+    pub elapsed: u64,
+    pub network: bool,
+    pub cancel_requested: bool,
+    pub message: String,
+}
+#[derive(Clone, Default)]
 pub struct State {
     pub root: Option<String>,
     pub addr: String,
+    pub connection_epoch: u64,
     pub device_name: String,
     pub devices: Vec<(String, String)>,
     pub connected_devices: Vec<String>,
@@ -71,6 +91,9 @@ pub struct State {
     pub native_delivery: bool,
     pub bulk_delivery: bool,
     pub expected_revision: u32,
+    pub resident_revision: u32,
+    pub resident_target: String,
+    pub resident_capabilities: u32,
     pub cloud_modules: Vec<crate::cloud::Module>,
     pub cloud_notice: String,
     pub download: Option<crate::cloud_download::Progress>,
@@ -81,8 +104,10 @@ pub struct State {
     pub install_id: String,
     pub module_jobs: Vec<ModuleJob>,
     pub status: String,
+    pub pending_action: String,
     pub query: String,
     pub results: Vec<CloudSong>,
+    pub song_job: Option<SongJob>,
     pub playlists: Vec<CloudPlaylist>,
     pub cookie: String,
     pub qr_key: String,
@@ -104,6 +129,9 @@ pub struct State {
     pub transcoding: bool,
 }
 impl State {
+    pub fn downloading_artifact(&self) -> bool {
+        self.download.as_ref().is_some_and(|p| !matches!(&p.owner, crate::cloud_download::Owner::Catalog))
+    }
     pub fn module_download(&self, id: &str) -> Option<&crate::cloud_download::Progress> {
         self.download.as_ref().filter(|p| matches!(&p.owner, crate::cloud_download::Owner::Module(owner) if owner == id))
     }
@@ -134,6 +162,7 @@ pub fn snapshot() -> State {
 }
 pub fn error(e: String) {
     with(|s| {
+        if let Some(job) = &mut s.song_job { job.message = e.clone(); job.network = false; }
         s.status = e;
         s.active = false;
     });
