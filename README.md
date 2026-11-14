@@ -1,6 +1,6 @@
 # ChemClient
 
-ChemClient 1.7.32 is the Chem module manager and NoirMusic/Magic importer for API 4 / WASI 2.
+ChemClient 1.7.35 is the Chem module manager and NoirMusic/Magic importer for API 4 / WASI 2.
 Select an installed module to open its content uploader directly. The enable switch,
 Delete and available Update icons share one compact row beside the module.
 Normal rows show only the module name and controls. Delete uses a static trash
@@ -18,8 +18,8 @@ quality, cover and lyrics are grouped under the optional import settings.
 The independent `com.chem.manager` bridge currently supports Band 9 / 3.1.35.
 Run Chem once on the wearable. Loader build 0x26111303 processes management on
 the existing resident owner loop, including when LVGL screen refresh stops.
-Startup probes the resident service before inspecting or opening the installer;
-a working service does not require the Chem watchface to be current.
+Startup probes the resident service directly, independent of the current watchface.
+Install and run Chem manually on the wearable before connecting.
 Management replies use SDK ABI 2.0, matching outgoing requests.
 Automatic startup is off by default and requires explicit confirmation in the
 manager. Startup guards persist before module execution and observe stability
@@ -47,35 +47,27 @@ https://gh-proxy.com/ . Magic provides resource package import and management;
 other unsupported modules show their management controls only.
 
 Startup automatically checks the host connection, exact device identity and
-resident service. If that probe fails, it checks the installer version.
-Missing or old installers show one Install button. Only that
-user click starts downloading, verification and queue submission. The download
-shows received bytes, percentage and elapsed time, and can be cancelled.
-An installed, inactive installer also requires an Open click to switch.
-Once installation is requested, the client polls actual installation and waits
-for Run. Astro API 4 exposes queue submission only, so starting that upload may
-still require the host queue. Cloud modules similarly download, verify and import
-after one Install or Update click. Opening or refreshing never starts installation.
+resident service. If Chem is not running, the client asks the user to run it on
+the wearable and continues service discovery. This plugin does not download,
+queue, inspect or switch Chem installer watchfaces and requests neither Queue nor
+Watchface permission. Framework version metadata is still refreshed from the cloud;
+a newer build shows a nonblocking notice at the top without disabling current use.
+Cloud modules download, verify and import after one Install or Update click.
 No device page or manual module-connection sequence is needed.
+
+Music task cards stay inside NoirMusic's uploader views, including completed jobs;
+returning to the module homepage never displays them. Search results keep progress
+beneath the matching song, with one fallback card inside NoirMusic if that song is
+not in the current result set. Native UI element identities are scoped by page and
+module/song/package ID so inserting progress, refreshing lists or navigating does
+not reuse another card's nodes.
 
 Cloud requests use nonblocking WASI HTTP polling, bounded ticks, a 10-second
 connect timeout, 20 seconds without data and a two-minute total deadline. The UI
-remains responsive while waiting; errors leave install/retry actions available.
-Both response futures and body streams subscribe and poll readiness before reads,
-so the host can advance pending HTTP responses without blocking the UI.
-Known-length downloads complete on the last byte, with catalog/HTTP length and
-SHA-256 checks. Completion, verification and host queue submission update the UI
-before filesystem/queue calls, so a pending host call cannot look like a stalled
-98% download. The download timer stops after the completion handoff.
-
-Known host blocker: the current published API 4 Queue implementation calls
-`block_on` inside its Tokio driver. A real 1.7.5 run on 2026-11-11 panicked with
-`Cannot start a runtime from within a runtime` and terminated the plugin driver.
-Downloaded loader bytes were complete and matched the published SHA-256.
-The host must dispatch queue permission and enqueue work asynchronously and
-resolve plugin-relative paths before passing them to the frontend. See the
-[official queue contract](https://abox.run/docs/plugin-development/v2/host-api/queue).
-Changing this plugin's progress display cannot repair that host panic.
+remains responsive while waiting. Both response futures and body streams subscribe
+and poll readiness before reads. Known-length downloads complete on the last byte,
+with catalog/HTTP length and SHA-256 checks; completion renders before verification
+and module delivery. The download timer stops after the completion handoff.
 
 Optional local artwork/LRC and automatic NetEase artwork/lyrics are supported.
 NetEase HTTP waits use the API 4 runtime's native WASI 0.3 async clock, so they

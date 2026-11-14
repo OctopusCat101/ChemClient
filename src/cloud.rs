@@ -10,11 +10,8 @@ pub struct Artifact {
     pub sha256: String,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Loader {
+pub struct FrameworkVersion {
     pub version: u32,
-    pub face_id: String,
-    #[serde(flatten)]
-    pub artifact: Artifact,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Module {
@@ -32,11 +29,11 @@ pub struct Target {
     pub target: String,
     pub firmware_sha256: String,
     pub device_ids: Vec<String>,
-    pub loader: Loader,
+    pub loader: FrameworkVersion,
     pub modules: Vec<Module>,
     /// True for targets known locally but not published in the cloud catalog.
     /// Such a target can be identified and used with a locally imported
-    /// `.chem`, but has no downloadable loader or cloud modules. Never set by
+    /// `.chem`, but has no cloud modules. Never set by
     /// the repository catalog (see `validate`).
     #[serde(default, skip_serializing)]
     pub local_only: bool,
@@ -99,7 +96,7 @@ fn known_target(t: &KnownTarget) -> Target {
         target: t.target.into(),
         firmware_sha256: t.firmware_sha256.into(),
         device_ids: t.device_ids.iter().map(|s| (*s).into()).collect(),
-        loader: Loader::default(),
+        loader: FrameworkVersion::default(),
         modules: Vec::new(),
         local_only: true,
     }
@@ -112,7 +109,9 @@ fn local_entry_ok(t: &Target) -> bool {
         && hash(&t.firmware_sha256)
         && !t.device_ids.is_empty()
         && t.device_ids.len() <= 16
-        && t.device_ids.iter().all(|id| !id.is_empty() && id.len() <= 64)
+        && t.device_ids
+            .iter()
+            .all(|id| !id.is_empty() && id.len() <= 64)
 }
 
 /// Identity-only targets: built-ins first, then optional operator overrides
@@ -130,7 +129,7 @@ pub fn local_targets() -> Vec<Target> {
                         target: item.target,
                         firmware_sha256: item.firmware_sha256,
                         device_ids: item.device_ids,
-                        loader: Loader::default(),
+                        loader: FrameworkVersion::default(),
                         modules: Vec::new(),
                         local_only: true,
                     };
@@ -153,20 +152,13 @@ pub fn identify_target(catalog: &Catalog, firmware: &str, model: &str) -> Option
         .targets
         .iter()
         .find(|t| {
-            t.firmware == firmware
-                && t
-                    .device_ids
-                    .iter()
-                    .any(|id| id.eq_ignore_ascii_case(model))
+            t.firmware == firmware && t.device_ids.iter().any(|id| id.eq_ignore_ascii_case(model))
         })
         .cloned()
         .or_else(|| {
             local_targets().into_iter().find(|t| {
                 t.firmware == firmware
-                    && t
-                        .device_ids
-                        .iter()
-                        .any(|id| id.eq_ignore_ascii_case(model))
+                    && t.device_ids.iter().any(|id| id.eq_ignore_ascii_case(model))
             })
         })
 }
@@ -213,13 +205,11 @@ pub fn validate(c: &Catalog) -> Result<(), String> {
             || t.local_only
             || !targets.insert(t.target.clone())
             || t.modules.len() > 64
-            || t.loader.face_id.len() != 9
-            || !t.loader.face_id.bytes().all(|c| c.is_ascii_digit())
+            || t.loader.version == 0
         {
             return Err("云端目标信息无效".into());
         }
         let prefix = format!("{}/{}/", t.model, t.firmware);
-        artifact(&t.loader.artifact, 16 * 1024 * 1024, &prefix, "face")?;
         let mut ids = std::collections::BTreeSet::new();
         for m in &t.modules {
             if !package::module_id(&m.id)
@@ -265,6 +255,23 @@ pub fn fixture() -> Result<Catalog, String> {
 mod tests {
     use super::*;
     #[test]
+    fn framework_version_checks_do_not_require_a_watchface_artifact() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/catalog.json")).unwrap();
+        let revision = value["targets"][0]["loader"]["version"].as_u64().unwrap();
+        value["targets"][0]["loader"] = serde_json::json!({"version": revision});
+        let catalog: Catalog = serde_json::from_value(value).unwrap();
+        assert!(validate(&catalog).is_ok());
+        let mut s = crate::state::State {
+            expected_revision: catalog.targets[0].loader.version,
+            resident_revision: revision as u32 - 1,
+            ..Default::default()
+        };
+        assert!(s.needs_update());
+        s.resident_revision = revision as u32;
+        assert!(!s.needs_update());
+    }
+    #[test]
     fn local_only_is_rejected_in_cloud_catalogs() {
         let mut c = fixture().unwrap();
         c.targets[0].local_only = true;
@@ -279,7 +286,7 @@ mod tests {
         assert_eq!(t.firmware, "3.1.28");
         assert!(t.local_only);
         assert!(t.modules.is_empty());
-        assert!(t.loader.artifact.path.is_empty());
+        assert_eq!(t.loader.version, 0);
         assert!(t.device_ids.iter().any(|id| id == "miwear.watch.o66nfc"));
         assert!(t.device_ids.iter().any(|id| id == "M2456B1"));
         assert!(hash(&t.firmware_sha256));

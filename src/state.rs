@@ -97,7 +97,6 @@ pub struct State {
     pub cloud_modules: Vec<crate::cloud::Module>,
     pub cloud_notice: String,
     pub download: Option<crate::cloud_download::Progress>,
-    pub installer_action: Option<crate::bootstrap::InstallerAction>,
     pub installing: bool,
     pub install_sent: u64,
     pub install_total: u64,
@@ -212,7 +211,6 @@ mod tests {
         assert_eq!(s.module_jobs[1].message, "已安装");
         s.download = Some(Progress {
             owner: Owner::Module("one".into()),
-            label: String::new(),
             received: 30,
             total: Some(100),
             elapsed: 1,
@@ -220,7 +218,7 @@ mod tests {
         });
         assert_eq!(s.module_download("one").unwrap().percent(), Some(30));
         assert!(s.module_download("two").is_none());
-        for owner in [Owner::Catalog, Owner::Loader] {
+        for owner in [Owner::Catalog] {
             s.download.as_mut().unwrap().owner = owner;
             assert!(s.module_download("one").is_none());
             assert!(s.module_download("loader").is_none());

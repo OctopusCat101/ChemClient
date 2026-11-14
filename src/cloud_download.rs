@@ -10,13 +10,11 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Owner {
     Catalog,
-    Loader,
     Module(String),
 }
 #[derive(Clone, Debug)]
 pub struct Progress {
     pub owner: Owner,
-    pub label: String,
     pub received: u64,
     pub total: Option<u64>,
     pub elapsed: u64,
@@ -35,7 +33,6 @@ impl Progress {
 }
 enum Destination {
     Catalog,
-    Loader,
     Module { id: String, version: u32 },
 }
 struct Job {
@@ -65,7 +62,6 @@ fn begin(
     addr: &str,
     destination: Destination,
     artifact: Option<&cloud::Artifact>,
-    label: String,
 ) -> Result<(), String> {
     let s = state::snapshot();
     if s.addr != addr || !s.device_connected() {
@@ -90,12 +86,10 @@ fn begin(
     let http = Http::start(&url)?;
     let owner = match &destination {
         Destination::Catalog => Owner::Catalog,
-        Destination::Loader => Owner::Loader,
         Destination::Module { id, .. } => Owner::Module(id.clone()),
     };
     let progress = Progress {
         owner,
-        label,
         received: 0,
         total: artifact.map(|a| a.size),
         elapsed: 0,
@@ -125,15 +119,7 @@ fn begin(
     Ok(())
 }
 pub fn catalog(addr: &str) -> Result<(), String> {
-    begin(addr, Destination::Catalog, None, "读取云端目录".into())
-}
-pub fn loader(addr: &str, artifact: &cloud::Artifact) -> Result<(), String> {
-    begin(
-        addr,
-        Destination::Loader,
-        Some(artifact),
-        "下载 Chem 安装器".into(),
-    )
+    begin(addr, Destination::Catalog, None)
 }
 pub fn module(addr: &str, module: &cloud::Module) -> Result<(), String> {
     begin(
@@ -143,7 +129,6 @@ pub fn module(addr: &str, module: &cloud::Module) -> Result<(), String> {
             version: module.version,
         },
         Some(&module.artifact),
-        format!("下载 {}", module.name),
     )?;
     state::with(|s| s.module_message(&module.id, &module.name, "正在下载…"));
     Ok(())
@@ -154,9 +139,6 @@ pub fn cancel(silent: bool) {
         state::with(|s| s.download = None);
         if !silent {
             match job.destination {
-                Destination::Loader => {
-                    crate::bootstrap::download_failed("已取消安装，可重试".into())
-                }
                 Destination::Catalog => {
                     crate::connection::failed("已取消检查，点击刷新重试".into())
                 }
@@ -295,8 +277,7 @@ pub async fn tick() {
                 s.download = None;
                 s.status.clear();
             });
-            // Render completion before hashing, filesystem work or synchronous
-            // host queue calls, which otherwise leave the last download frame.
+            // Render completion before verification and delivery.
             ui::rerender();
             if state::snapshot().addr != job.addr {
                 ui::rerender();
@@ -318,11 +299,6 @@ pub async fn tick() {
                     if let Err(e) = crate::bootstrap::catalog_ready(&job.addr, catalog).await {
                         crate::connection::failed(e);
                     }
-                }
-                Destination::Loader => {
-                    let saved = result
-                        .and_then(|_| save(&job.bytes, job.artifact.as_ref().unwrap(), "face"));
-                    crate::bootstrap::download_finished(saved).await;
                 }
                 Destination::Module { id, version } => {
                     match result
@@ -493,7 +469,6 @@ mod tests {
     fn progress_and_payload_bounds_use_real_received_bytes() {
         let mut p = Progress {
             owner: Owner::Catalog,
-            label: "test".into(),
             received: 0,
             total: Some(100),
             elapsed: 0,

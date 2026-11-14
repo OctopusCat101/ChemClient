@@ -1,8 +1,8 @@
 //! Fluid Material 3 views built from API 4 native HTML primitives.
 use crate::{
     astrobox::psys_host_v4::{dialog, ui},
-    attachments, bootstrap, cloud_download, connection, delivery, modules, netease, state,
-    transcode, transfer,
+    attachments, cloud_download, connection, delivery, modules, netease, state, transcode,
+    transfer,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use qrcode::{QrCode, render::svg};
@@ -21,25 +21,40 @@ const SURFACE: &str = "#000000";
 const CARD: &str = "#1C211F";
 thread_local! {
     static UI_NODES: RefCell<HashMap<String, ui::Element>> = RefCell::new(HashMap::new());
-    static UI_POSITION: RefCell<u32> = const { RefCell::new(0) };
+    static UI_LAYOUT: RefCell<LayoutIdentity> = RefCell::new(LayoutIdentity::default());
+}
+#[derive(Default)]
+struct LayoutIdentity {
+    scope: String,
+    positions: HashMap<String, u32>,
+}
+impl LayoutIdentity {
+    fn key(&self, key: &str) -> String {
+        format!("{}:{key}", self.scope)
+    }
+    fn next(&mut self, kind: ui::ElementType) -> String {
+        let position = self.positions.entry(self.scope.clone()).or_default();
+        *position += 1;
+        format!("layout:{position}:{kind:?}")
+    }
+}
+fn scope(key: &str) {
+    UI_LAYOUT.with(|layout| layout.borrow_mut().scope = key.into());
 }
 fn layout_node(kind: ui::ElementType, content: Option<&str>) -> ui::Element {
-    let position = UI_POSITION.with(|p| {
-        let mut p = p.borrow_mut();
-        *p += 1;
-        *p
-    });
-    stable_node(kind, content, &format!("layout:{position}:{kind:?}"))
+    let key = UI_LAYOUT.with(|layout| layout.borrow_mut().next(kind));
+    stable_node(kind, content, &key)
 }
 // Host builders clone borrowed elements with their ID intact. Cache childless
 // prototypes so refreshing keeps node identity without accumulating children.
 fn stable_node(kind: ui::ElementType, content: Option<&str>, key: &str) -> ui::Element {
+    let key = UI_LAYOUT.with(|layout| layout.borrow().key(key));
     UI_NODES.with(|nodes| {
         let mut nodes = nodes.borrow_mut();
         let prototype = nodes
-            .entry(key.into())
+            .entry(key.clone())
             .or_insert_with(|| ui::Element::new(kind, None).without_default_styles());
-        prototype.content(content).prop("key", key)
+        prototype.content(content).prop("key", &key)
     })
 }
 fn fixed_box(el: ui::Element, width: u32, height: u32) -> ui::Element {
@@ -166,9 +181,6 @@ fn connection_blocked(s: &state::State, event: &str) -> bool {
             || s.manager_busy
             || s.download.is_some()
             || transfer::busy();
-    }
-    if event == "loader-install" {
-        return !s.device_connected() || s.discovering || s.connection.busy();
     }
     if event == "module-import" || event.starts_with("module-install:") {
         return !s.manager_connected() || !s.native_delivery;
@@ -419,13 +431,14 @@ fn song_activity(mut card: ui::Element, s: &state::State, id: u64) -> ui::Elemen
     let Some(job) = s.song_job.as_ref().filter(|j| j.id == id) else {
         return card;
     };
-    let running = job.network || s.active;
+    let uploading = s.active && !crate::magic::busy();
+    let running = job.network || uploading;
     let (bytes, total, speed) = if job.network {
         (job.received, job.total, job.speed)
     } else {
         (s.sent, (s.total > 0).then_some(s.total), s.speed)
     };
-    let message = if !job.network && s.active {
+    let message = if !job.network && uploading {
         if s.transcoding {
             "正在处理音频"
         } else {
@@ -533,12 +546,91 @@ pub fn render(root: &str) {
     state::with(|s| s.root = Some(root.into()));
     rerender();
 }
+fn standalone_song_visible(s: &state::State, tab: &str) -> bool {
+    matches!(tab, "local" | "cloud" | "library")
+        && s.song_job
+            .as_ref()
+            .is_some_and(|job| tab != "cloud" || !s.results.iter().any(|song| song.id == job.id))
+}
+fn local_transfer_visible(s: &state::State, tab: &str) -> bool {
+    matches!(tab, "local" | "cloud" | "library") && s.active && s.song_job.is_none()
+}
 fn connection_panel_visible(s: &state::State) -> bool {
     !s.manager_connected()
 }
 #[cfg(test)]
 mod connection_visibility_tests {
     use super::*;
+    #[test]
+    fn music_tasks_never_render_on_module_or_magic_pages() {
+        let mut s = connected();
+        s.song_job = Some(state::SongJob {
+            id: 7,
+            name: "cutie conductor".into(),
+            message: "导入完成 · 含封面 · 含歌词".into(),
+            ..Default::default()
+        });
+        for active in [false, true] {
+            s.active = active;
+            for network in [false, true] {
+                s.song_job.as_mut().unwrap().network = network;
+                for tab in ["modules", "magic", "module-uploader"] {
+                    assert!(!standalone_song_visible(&s, tab));
+                    assert!(!local_transfer_visible(&s, tab));
+                }
+                for tab in ["local", "cloud", "library"] {
+                    assert!(standalone_song_visible(&s, tab));
+                    assert!(!local_transfer_visible(&s, tab));
+                }
+            }
+        }
+        s.results.push(state::CloudSong {
+            id: 7,
+            ..Default::default()
+        });
+        assert!(
+            !standalone_song_visible(&s, "cloud"),
+            "avoid duplicate song cards"
+        );
+        assert!(standalone_song_visible(&s, "local"));
+        s.results.clear();
+        assert!(
+            standalone_song_visible(&s, "cloud"),
+            "keep ongoing work in its uploader"
+        );
+        s.song_job = None;
+        assert!(!local_transfer_visible(&s, "modules"));
+        assert!(!local_transfer_visible(&s, "magic"));
+        assert!(local_transfer_visible(&s, "local"));
+    }
+    #[test]
+    fn node_identity_is_stable_across_navigation_progress_and_list_reordering() {
+        fn node(layout: &mut LayoutIdentity, scope: &str) -> String {
+            layout.scope = scope.into();
+            let key = layout.next(ui::ElementType::Div);
+            layout.key(&key)
+        }
+        let mut first = LayoutIdentity::default();
+        node(&mut first, "chrome:version");
+        let song = node(&mut first, "page:cloud:song:7");
+        let music = node(&mut first, "page:modules:module:bluetooth_audio");
+        node(&mut first, "page:modules:module:bluetooth_audio"); // progress added
+        let magic = node(&mut first, "page:modules:module:com.chem.magic");
+        let mut refresh = LayoutIdentity::default();
+        assert_eq!(
+            magic,
+            node(&mut refresh, "page:modules:module:com.chem.magic")
+        );
+        assert_eq!(
+            music,
+            node(&mut refresh, "page:modules:module:bluetooth_audio")
+        );
+        let homepage = node(&mut refresh, "page:modules:content");
+        assert_ne!(song, homepage);
+        let mut reopened = LayoutIdentity::default();
+        assert_eq!(song, node(&mut reopened, "page:cloud:song:7"));
+        assert_ne!(song, node(&mut reopened, "page:cloud:song:8"));
+    }
     fn connected() -> state::State {
         state::State {
             addr: "band".into(),
@@ -576,14 +668,13 @@ mod connection_visibility_tests {
         let mut s = connected();
         s.download = Some(cloud_download::Progress {
             owner: cloud_download::Owner::Catalog,
-            label: String::new(),
             received: 0,
             total: None,
             elapsed: 0,
             connecting: true,
         });
         assert!(!module_busy(&s) && !s.downloading_artifact());
-        s.download.as_mut().unwrap().owner = cloud_download::Owner::Loader;
+        s.download.as_mut().unwrap().owner = cloud_download::Owner::Module("music".into());
         assert!(module_busy(&s) && s.downloading_artifact());
     }
     #[test]
@@ -630,7 +721,6 @@ mod connection_visibility_tests {
             ..Default::default()
         });
         let events = [
-            "loader-install",
             "module-import",
             "module-install:music",
             "module:music",
@@ -674,7 +764,6 @@ mod connection_visibility_tests {
         s.connection = connection::Phase::Failed("service lost".into());
         assert!(connection_blocked(&s, "module-toggle:music"));
         assert!(connection_blocked(&s, "upload"));
-        assert!(!connection_blocked(&s, "loader-install"));
     }
     #[test]
     fn older_chem_keeps_connected_module_and_uploader_controls_available() {
@@ -752,7 +841,13 @@ mod connection_visibility_tests {
     }
 }
 fn build(s: &state::State) -> ui::Element {
-    UI_POSITION.with(|p| *p.borrow_mut() = 0);
+    UI_LAYOUT.with(|layout| *layout.borrow_mut() = LayoutIdentity::default());
+    let tab = if s.tab == "module-uploader" {
+        uploader_tab(s, &s.module_detail)
+    } else {
+        &s.tab
+    };
+    scope("chrome:root");
     // No fixed content width or duplicate app hero: the host already owns its title.
     let mut root = stable_node(ui::ElementType::Div, None, "chem-root")
         .flex()
@@ -771,7 +866,7 @@ fn build(s: &state::State) -> ui::Element {
     let connection_text = match &s.connection {
         connection::Phase::Checking => "正在检查连接…",
         connection::Phase::Modules => "正在读取模块…",
-        connection::Phase::Installer(message) => message,
+        connection::Phase::WaitingForService(message) => message,
         connection::Phase::Ready => {
             if s.device_name.is_empty() {
                 "手环已连接"
@@ -781,11 +876,13 @@ fn build(s: &state::State) -> ui::Element {
         }
         connection::Phase::Failed(message) => message,
     };
+    scope("chrome:connection");
     let connection_bar = row().child(equal(text(connection_text, 14, MUTED)));
     if connection_panel_visible(s) {
         root = root.child(connection_bar);
     }
     if s.needs_update() {
+        scope("chrome:version");
         root = root.child(text(
             &format!(
                 "Chem 有更新（当前 {:08X}，云端 {:08X}），可继续使用当前版本。",
@@ -795,55 +892,38 @@ fn build(s: &state::State) -> ui::Element {
             MUTED,
         ));
     }
-    if let Some(action) = s.installer_action.filter(|_| !s.manager_ready) {
-        let (label, event) = match action {
-            bootstrap::InstallerAction::Install => ("安装", "loader-install"),
-            bootstrap::InstallerAction::Open => ("打开安装器", "loader-install"),
-        };
-        root = root.child(
-            card()
-                .child(text("Chem 安装器", 20, INK))
-                .child(button(label, event, true)),
-        );
-    }
-    if let Some(p) = s
-        .download
-        .as_ref()
-        .filter(|p| matches!(p.owner, cloud_download::Owner::Loader))
-    {
-        let detail = if p.connecting {
-            format!("等待服务器响应 · {} 秒", p.elapsed)
-        } else if let Some(percent) = p.percent() {
-            format!(
-                "{percent}% · {:.1} / {:.1} KB · {} 秒",
-                p.received as f64 / 1024.0,
-                p.total.unwrap_or(0) as f64 / 1024.0,
-                p.elapsed
-            )
-        } else {
-            format!(
-                "已下载 {:.1} KB · {} 秒",
-                p.received as f64 / 1024.0,
-                p.elapsed
-            )
-        };
-        let mut download_card = card()
-            .child(text(&p.label, 20, INK))
-            .child(text(&detail, 14, MUTED));
-        if let Some(percent) = p.percent() {
-            download_card = download_card.child(progress_bar(percent));
-        }
-        root = root.child(download_card.child(button("取消下载", "cancel", false)));
-    }
     if !s.status.is_empty() {
+        scope("chrome:status");
         root = root.child(text(
             &s.status,
             13,
             if s.direct { "#B5F2C7" } else { MUTED },
         ));
     }
+    scope(&format!("page:{tab}:navigation"));
+    if matches!(tab, "local" | "cloud" | "library" | "module-uploader") {
+        let name = s
+            .modules
+            .iter()
+            .find(|m| m.id == s.module_detail)
+            .map(|m| m.name())
+            .unwrap_or("模块");
+        root = root.child(
+            row()
+                .child(equal(button("‹ 模块列表", "tab:modules", false)))
+                .child(equal(text(name, 22, INK))),
+        );
+    }
+    if matches!(tab, "local" | "cloud" | "library") {
+        let mut music_nav = equal_row();
+        for (id, label) in [("local", "本地"), ("cloud", "网易云"), ("library", "曲库")] {
+            music_nav = music_nav.child(equal(button(label, &format!("tab:{id}"), tab == id)));
+        }
+        root = root.child(music_nav);
+    }
     if let Some(job) = &s.song_job {
-        if s.tab != "cloud" || !s.results.iter().any(|song| song.id == job.id) {
+        if standalone_song_visible(s, tab) {
+            scope(&format!("page:{tab}:song:{}", job.id));
             root = root.child(song_activity(
                 card().child(text(&job.name, 18, INK)),
                 s,
@@ -851,7 +931,8 @@ fn build(s: &state::State) -> ui::Element {
             ));
         }
     }
-    if s.active && s.song_job.is_none() && !crate::magic::busy() {
+    if local_transfer_visible(s, tab) && !crate::magic::busy() {
+        scope(&format!("page:{tab}:music-transfer"));
         let progress = if s.total == 0 {
             0
         } else {
@@ -904,31 +985,7 @@ fn build(s: &state::State) -> ui::Element {
                 .child(button("取消导入", "cancel", false)),
         );
     }
-    let tab = if s.tab == "module-uploader" {
-        uploader_tab(s, &s.module_detail)
-    } else {
-        &s.tab
-    };
-    if matches!(tab, "local" | "cloud" | "library" | "module-uploader") {
-        let name = s
-            .modules
-            .iter()
-            .find(|m| m.id == s.module_detail)
-            .map(|m| m.name())
-            .unwrap_or("模块");
-        root = root.child(
-            row()
-                .child(equal(button("‹ 模块列表", "tab:modules", false)))
-                .child(equal(text(name, 22, INK))),
-        );
-    }
-    if matches!(tab, "local" | "cloud" | "library") {
-        let mut music_nav = equal_row();
-        for (id, label) in [("local", "本地"), ("cloud", "网易云"), ("library", "曲库")] {
-            music_nav = music_nav.child(equal(button(label, &format!("tab:{id}"), tab == id)));
-        }
-        root = root.child(music_nav);
-    }
+    scope(&format!("page:{tab}:content"));
     match tab {
         "modules" => {
             root = root.child(
@@ -961,6 +1018,7 @@ fn build(s: &state::State) -> ui::Element {
                 root = root.child(text(&s.cloud_notice, 14, MUTED));
             }
             if s.manager_ready && s.boot_status & 1 != 0 {
+                scope("page:modules:boot");
                 let enabled = s.boot_status & 2 != 0;
                 root = root.child(
                     stable_node(ui::ElementType::Div, None, "boot-panel")
@@ -986,6 +1044,7 @@ fn build(s: &state::State) -> ui::Element {
                 );
             }
             if s.manager_ready && s.safe_mode {
+                scope("page:modules:safe-mode");
                 root = root.child(text(
                     if s.safe_exit_pending {
                         "恢复设置已保存，请重启手环"
@@ -1018,9 +1077,11 @@ fn build(s: &state::State) -> ui::Element {
                 && s.cloud_modules.is_empty()
                 && s.module_jobs.is_empty()
             {
+                scope("page:modules:empty");
                 root = root.child(card().child(text("暂无已安装模块", 20, INK)));
             }
             for m in &s.modules {
+                scope(&format!("page:modules:module:{}", m.id));
                 let entry = stable_node(
                     ui::ElementType::Button,
                     Some(m.name()),
@@ -1082,6 +1143,7 @@ fn build(s: &state::State) -> ui::Element {
                 .iter()
                 .filter(|c| !s.modules.iter().any(|m| m.id == c.id))
             {
+                scope(&format!("page:modules:module:{}", m.id));
                 root = root.child(module_activity(
                     card().child(
                         row()
@@ -1109,6 +1171,7 @@ fn build(s: &state::State) -> ui::Element {
                 !s.modules.iter().any(|m| m.id == j.id)
                     && !s.cloud_modules.iter().any(|m| m.id == j.id)
             }) {
+                scope(&format!("page:modules:module:{}", job.id));
                 root = root.child(module_activity(
                     card().child(text(&job.name, 20, INK)),
                     s,
@@ -1178,6 +1241,7 @@ fn build(s: &state::State) -> ui::Element {
             }
             root = root.child(import);
             for (i, (name, enabled)) in magic.rows.iter().enumerate() {
+                scope(&format!("page:magic:pack:{name}"));
                 root = root.child(
                     row()
                         .padding_left(4)
@@ -1270,6 +1334,7 @@ fn build(s: &state::State) -> ui::Element {
             }
             root = root.child(pane);
             for playlist in &s.playlists {
+                scope(&format!("page:cloud:playlist:{}", playlist.id));
                 root = root.child(
                     card()
                         .child(text(&playlist.name, 18, INK))
@@ -1285,6 +1350,7 @@ fn build(s: &state::State) -> ui::Element {
                 );
             }
             for song in &s.results {
+                scope(&format!("page:cloud:song:{}", song.id));
                 let mut title = column()
                     .flex_grow(1.0)
                     .child(text(&song.name, 18, INK))
@@ -1317,6 +1383,7 @@ fn build(s: &state::State) -> ui::Element {
                 )));
             }
             for track in &s.library {
+                scope(&format!("page:library:track:{}", track["id"]));
                 let mut item = card().child(text(
                     track["name"].as_str().unwrap_or("未命名歌曲"),
                     18,
@@ -1447,6 +1514,7 @@ fn build(s: &state::State) -> ui::Element {
             root = root.child(pane);
         }
     }
+    scope("chrome:footer");
     root.child(text(
         concat!("ChemClient ", env!("CARGO_PKG_VERSION")),
         12,
@@ -1727,9 +1795,6 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
     if id == "refresh" {
         connection::refresh(true).await;
         return Ok(());
-    }
-    if id == "loader-install" {
-        return bootstrap::install().await;
     }
     if let Some(module) = id.strip_prefix("module-install:") {
         let s = state::snapshot();

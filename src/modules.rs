@@ -776,16 +776,13 @@ mod tests {
         let s = state::snapshot();
         assert!(s.needs_update() && s.manager_connected() && !s.manager_busy);
         assert_eq!(s.resident_revision, 0x26111303);
-        assert_eq!(s.installer_action, None);
         assert_eq!(s.connection, connection::Phase::Ready);
         assert!(s.native_delivery && s.bulk_delivery);
         state::with(|s| {
-            s.installer_action = None;
-            s.connection = connection::Phase::Installer("等待用户完成安装".into());
+            s.connection = connection::Phase::WaitingForService("等待用户运行 Chem".into());
         });
         link(|l| l.pending = Some(pending()));
         complete(received(&packet));
-        assert_eq!(state::snapshot().installer_action, None);
         assert!(state::snapshot().manager_connected() && state::snapshot().bulk_delivery);
         fail("temporary timeout".into());
         assert_eq!(
@@ -799,7 +796,6 @@ mod tests {
         let s = state::snapshot();
         assert!(!s.needs_update() && s.manager_ready && !s.manager_busy);
         assert_eq!(s.connection, connection::Phase::Ready);
-        assert_eq!(s.installer_action, None);
         state::with(|s| *s = state::State::default());
     }
     #[test]

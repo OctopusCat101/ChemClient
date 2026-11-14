@@ -59,7 +59,6 @@ impl event::Guest for ChemClient {
                     "music-link" => transfer::tick().await,
                     "magic-link" => magic::tick().await,
                     "chem-manager" => modules::tick().await,
-                    "chem-bootstrap" => bootstrap::tick().await,
                     "chem-download" => cloud_download::tick().await,
                     "chem-connection" => connection::tick().await,
                     _ => {}

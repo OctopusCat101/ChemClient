@@ -1,7 +1,7 @@
 {
   "name": "ChemClient",
   "icon": "icon.png",
-  "version": "1.7.34",
+  "version": "1.7.35",
   "description": "Chem 客户端：模块管理、NoirMusic 音乐与 Magic 资源包导入",
   "author": "Chem contributors",
   "website": "https://github.com/OctopusCat101/ChemClient",
@@ -11,9 +11,7 @@
   "permissions": [
     "request",
     "register_transport_recv",
-    "device",
-    "watchface",
-    "queue"
+    "device"
   ],
   "additional_files": [
     "cloud.json"

@@ -1,50 +1,15 @@
-//! Probe the resident Chem service first; offer the installer only on failure.
+//! Discover the resident Chem service and cloud module/version metadata.
 use crate::{
-    astrobox::psys_host_v4::{queue, timer, transport, watchface},
-    cloud, cloud_download,
-    connection::Phase,
-    modules, protocol, state, ui,
+    astrobox::psys_host_v4::transport, cloud, cloud_download, connection::Phase, modules, protocol,
+    state, ui,
 };
 use std::{
     sync::{Mutex, OnceLock},
     time::Instant,
 };
-#[derive(Clone)]
-struct Waiting {
-    addr: String,
-    target: cloud::Target,
-    queued: bool,
-    since: Instant,
-    inspect: bool,
-    inspected: bool,
-    local_only: bool,
-}
-impl Waiting {
-    fn probe_failed(&mut self) -> bool {
-        if self.queued {
-            return false;
-        }
-        self.inspect = !self.inspected;
-        self.since.elapsed().as_secs() < 180
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstallerAction {
-    Install,
-    Open,
-}
-#[derive(Clone)]
-struct Candidate {
-    addr: String,
-    target: cloud::Target,
-    path: Option<String>,
-}
 #[derive(Default)]
 struct Bootstrap {
-    candidate: Option<Candidate>,
-    waiting: Option<Waiting>,
-    timer: bool,
-    polling: bool,
+    waiting_since: Option<Instant>,
     device_info: Option<Vec<u8>>,
     catalog: Option<cloud::Catalog>,
     /// A precise "unsupported device" reason, kept so a later service-probe
@@ -71,35 +36,25 @@ fn with<R>(f: impl FnOnce(&mut Bootstrap) -> R) -> R {
 }
 pub fn reset() {
     with(|b| {
-        // Astro may still be reading a user-submitted queue file after a timeout.
-        let queued = b.waiting.as_ref().is_some_and(|w| w.queued);
-        b.waiting = None;
-        if let Some(c) = b.candidate.take() {
-            if !queued {
-                if let Some(path) = c.path {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
-        b.polling = false;
+        b.waiting_since = None;
         b.device_info = None;
         b.catalog = None;
         b.identification_error = None;
     });
 }
 pub fn connected() {
-    with(|b| b.waiting = None);
+    with(|b| b.waiting_since = None);
     state::with(|s| {
-        s.installer_action = None;
         s.status.clear();
     });
 }
 pub fn probe_failed(_error: &str) -> bool {
-    let (retrying, local_only, unsupported) = with(|b| {
-        let unsupported = b.identification_error.is_some();
-        let local_only = b.waiting.as_ref().is_some_and(|w| w.local_only);
-        let retrying = b.waiting.as_mut().is_some_and(Waiting::probe_failed);
-        (retrying, local_only, unsupported)
+    let (retrying, unsupported) = with(|b| {
+        (
+            b.waiting_since
+                .is_some_and(|since| since.elapsed().as_secs() < 180),
+            b.identification_error.is_some(),
+        )
     });
     // Identification happens after the first service probe has already been
     // sent. If it fails, the bootstrap state machine was never armed; keep the
@@ -110,14 +65,8 @@ pub fn probe_failed(_error: &str) -> bool {
     }
     if retrying {
         state::with(|s| {
-            s.connection = Phase::Installer(if s.installer_action.is_some() {
-                "Chem 尚未运行，请打开安装器并点击运行".into()
-            } else if local_only {
-                "已识别该设备，但未收到 Chem 服务回复；请确认手环已运行 Chem 安装器"
-                    .into()
-            } else {
-                "暂未连接 Chem，正在重试…".into()
-            });
+            s.connection =
+                Phase::WaitingForService("暂未连接 Chem，请在手环手动运行 Chem，正在重试…".into());
             // Transport details belong in diagnostics, not the connection UI.
             s.status.clear();
         });
@@ -149,7 +98,6 @@ pub async fn start(addr: &str) -> Result<(), String> {
     let epoch = state::snapshot().connection_epoch;
     state::with(|s| {
         s.connection = Phase::Checking;
-        s.installer_action = None;
         s.manager_ready = false;
         s.direct = false;
         s.native_delivery = false;
@@ -242,257 +190,25 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         s.native_delivery = !s.resident_target.is_empty() && s.resident_capabilities & 1 != 0;
         if local_only {
             s.cloud_notice = format!(
-                "已识别 {}：ChemCloud 尚未登记该设备，云端安装器与模块下载不可用；模块导入还需设备端启用原生传输。",
+                "已识别 {}：ChemCloud 尚未登记该设备，云端模块下载不可用；模块导入还需设备端启用原生传输。",
                 target.target
             );
         }
-    });
-    with(|b| {
-        b.candidate = Some(Candidate {
-            addr: addr.into(),
-            target: target.clone(),
-            path: None,
-        })
     });
     if s.manager_ready {
         return Ok(());
     }
     state::with(|s| {
-        s.installer_action = None;
         s.connection = Phase::Modules;
     });
-    // A resident service works with any watchface. Only inspect/open the
-    // installer after a real service probe fails; never gate probing on it.
-    wait(addr, target, false);
+    // Connection retries use the existing service loop, independent of watchfaces.
+    with(|b| b.waiting_since = Some(Instant::now()));
     if !state::snapshot().manager_busy {
         modules::connect_device(addr).await?;
     }
     ui::rerender();
     Ok(())
 }
-fn installer_action(installed: Option<bool>) -> Option<InstallerAction> {
-    match installed {
-        None => Some(InstallerAction::Install),
-        Some(false) => Some(InstallerAction::Open),
-        Some(true) => None,
-    }
-}
-fn wait(addr: &str, target: cloud::Target, queued: bool) {
-    let local_only = target.local_only;
-    with(|b| {
-        b.waiting = Some(Waiting {
-            addr: addr.into(),
-            target,
-            queued,
-            since: Instant::now(),
-            inspect: false,
-            inspected: false,
-            local_only,
-        });
-        if !b.timer {
-            timer::set_interval(2000, "chem-bootstrap");
-            b.timer = true;
-        }
-    });
-}
-fn download() -> Result<(), String> {
-    let s = state::snapshot();
-    if s.installer_action != Some(InstallerAction::Install) {
-        return Err("请刷新安装器状态".into());
-    }
-    let c = with(|b| b.candidate.clone()).ok_or("请先刷新设备信息")?;
-    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) {
-        return Err("手环连接已变化，请刷新".into());
-    }
-    if c.target.local_only {
-        return Err(
-            "该设备尚未在 ChemCloud 登记，暂无可下载的 Chem 安装器；请先安装对应 .face 后刷新"
-                .into(),
-        );
-    }
-    cloud_download::loader(&c.addr, &c.target.loader.artifact)?;
-    state::with(|s| s.installer_action = None);
-    Ok(())
-}
-pub async fn download_finished(result: Result<String, String>) {
-    match result {
-        Ok(path) => {
-            with(|b| {
-                if let Some(c) = &mut b.candidate {
-                    c.path = Some(path);
-                }
-            });
-            state::with(|s| {
-                s.installer_action = Some(InstallerAction::Install);
-                s.connection = Phase::Installer("正在安装 Chem…".into());
-                s.status.clear();
-            });
-            ui::rerender();
-            if let Err(error) = install().await {
-                download_failed(error);
-            }
-        }
-        Err(error) => download_failed(error),
-    }
-}
-pub fn download_failed(error: String) {
-    state::with(|s| {
-        s.installer_action = Some(InstallerAction::Install);
-        s.connection = Phase::Installer("安装未完成，可点击安装重试".into());
-        s.status = error;
-    });
-}
-pub async fn install() -> Result<(), String> {
-    let s = state::snapshot();
-    let c = with(|b| b.candidate.clone()).ok_or("请先刷新设备信息")?;
-    if c.addr != s.addr || !s.connected_devices.contains(&c.addr) {
-        return Err("手环连接已变化，请刷新".into());
-    }
-    match s.installer_action {
-        Some(InstallerAction::Install) => {
-            let Some(path) = c.path else {
-                return download();
-            };
-            // This flow starts only after the user clicks Install.
-            state::with(|s| {
-                s.installer_action = None;
-                s.connection = Phase::Installer("正在安装 Chem…".into());
-            });
-            ui::rerender();
-            queue::add_resource_to_queue(queue::ResourceType::Watchface, &path);
-            state::with(|s| {
-                s.installer_action = None;
-                s.connection = Phase::Installer(
-                    "已提交安装，请在 Astro 上传队列开始上传，正在等待安装完成…".into(),
-                );
-            });
-            wait(&c.addr, c.target, true);
-        }
-        Some(InstallerAction::Open) => {
-            watchface::set_current_watchface(c.addr.clone(), c.target.loader.face_id.clone())
-                .await
-                .map_err(|e| format!("打开安装器失败：{e}"))?;
-            state::with(|s| {
-                s.installer_action = None;
-                s.connection = Phase::Installer("请在手环安装器点击“运行”，正在等待连接…".into());
-            });
-            wait(&c.addr, c.target, false);
-            modules::connect_device(&c.addr).await?;
-        }
-        _ => return Err("请刷新安装器状态后点击安装".into()),
-    }
-    Ok(())
-}
-pub async fn tick() {
-    let wait = with(|b| {
-        if b.polling {
-            return None;
-        }
-        let w = b.waiting.clone()?;
-        b.polling = true;
-        Some(w)
-    });
-    let Some(w) = wait else {
-        return;
-    };
-    let s = state::snapshot();
-    if s.addr != w.addr || !s.connected_devices.contains(&w.addr) {
-        reset();
-        return;
-    }
-    if w.since.elapsed().as_secs() > if w.queued { 600 } else { 180 } {
-        reset();
-        crate::connection::failed(
-            if w.queued {
-                "尚未完成安装器上传，请检查 Astro 上传队列后刷新"
-            } else {
-                "尚未连接 Chem，请在手环运行安装器后刷新"
-            }
-            .into(),
-        );
-        return;
-    }
-    if !s.active && !s.installing && !s.manager_busy && s.download.is_none() {
-        if w.inspect && !w.inspected && !w.local_only {
-            match watchface::get_watchface_list(w.addr.clone()).await {
-                Ok(faces) => {
-                    if state::snapshot().addr != w.addr || state::snapshot().manager_ready {
-                        with(|b| b.polling = false);
-                        return;
-                    }
-                    let action = installer_action(
-                        faces
-                            .iter()
-                            .find(|f| f.id == w.target.loader.face_id)
-                            .map(|f| f.is_current),
-                    );
-                    state::with(|s| {
-                        s.installer_action = action;
-                        s.connection = Phase::Installer(
-                            match action {
-                                Some(InstallerAction::Install) => "需要安装或更新 Chem，请点击安装",
-                                Some(InstallerAction::Open) => "请打开 Chem 安装器并点击运行",
-                                None => "请在手环运行 Chem，正在等待连接…",
-                            }
-                            .into(),
-                        );
-                    });
-                    with(|b| {
-                        if let Some(w) = &mut b.waiting {
-                            w.inspected = true;
-                            w.inspect = false;
-                        }
-                    });
-                }
-                Err(_) => {} // Service retries remain independent of watchface RPC.
-            }
-        }
-        if w.queued {
-            match watchface::get_watchface_list(w.addr.clone()).await {
-                Ok(faces) => {
-                    if let Some(f) = faces.iter().find(|f| f.id == w.target.loader.face_id) {
-                        with(|b| {
-                            if let Some(c) = &mut b.candidate {
-                                if let Some(path) = c.path.take() {
-                                    let _ = std::fs::remove_file(path);
-                                }
-                            }
-                        });
-                        let result = if f.is_current {
-                            Ok(())
-                        } else {
-                            watchface::set_current_watchface(w.addr.clone(), f.id.clone()).await
-                        };
-                        match result {
-                            Ok(()) => {
-                                with(|b| {
-                                    if let Some(w) = &mut b.waiting {
-                                        w.queued = false;
-                                        w.since = Instant::now();
-                                    }
-                                });
-                                state::with(|s| {
-                                    s.connection = Phase::Installer(
-                                        "安装器已就绪，请在手环点击“运行”，正在等待连接…".into(),
-                                    )
-                                });
-                                let _ = modules::connect_device(&w.addr).await;
-                            }
-                            Err(e) => {
-                                reset();
-                                crate::connection::failed(format!("切换安装器失败：{e}"));
-                            }
-                        }
-                    }
-                }
-                Err(e) => state::with(|s| s.status = format!("等待安装器：{e}")),
-            }
-        }
-    }
-    with(|b| b.polling = false);
-    ui::rerender();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,30 +232,6 @@ mod tests {
             assert!(b.take_ready().is_none());
         }
     }
-    #[test]
-    fn installer_inspection_waits_for_a_failed_service_probe() {
-        let mut w = Waiting {
-            addr: "band".into(),
-            target: cloud::fixture().unwrap().targets.remove(0),
-            queued: false,
-            since: Instant::now(),
-            inspect: false,
-            inspected: false,
-            local_only: false,
-        };
-        assert!(!w.inspect);
-        assert!(w.probe_failed());
-        assert!(w.inspect);
-        w.inspected = true;
-        w.inspect = false;
-        assert!(w.probe_failed());
-        assert!(!w.inspect);
-        w.queued = true;
-        assert!(!w.probe_failed());
-        w.queued = false;
-        w.since = Instant::now() - std::time::Duration::from_secs(181);
-        assert!(!w.probe_failed());
-    }
     fn packet(firmware: &str, model: &str) -> Vec<u8> {
         fn field(id: u8, value: &[u8]) -> Vec<u8> {
             assert!(value.len() < 128);
@@ -552,13 +244,7 @@ mod tests {
         field(4, &field(3, &info))
     }
     #[test]
-    fn missing_or_old_installer_needs_a_user_action() {
-        assert_eq!(installer_action(None), Some(InstallerAction::Install));
-        assert_eq!(installer_action(Some(false)), Some(InstallerAction::Open));
-        assert_eq!(installer_action(Some(true)), None);
-    }
-    #[test]
-    fn exact_device_and_firmware_gate_cloud_loader() {
+    fn exact_device_and_firmware_gate_cloud_modules() {
         let c = cloud::fixture().unwrap();
         assert!(identify(&packet("3.1.35", "n66tc"), &c).is_ok());
         assert!(identify(&packet("3.1.35", "miwear.watch.n66tc"), &c).is_ok());
@@ -598,7 +284,13 @@ mod tests {
         // NFC must still be identified, otherwise bootstrap never arms its
         // retry state and a service probe timeout is reported as "no reply".
         let c = cloud::fixture().unwrap();
-        for model in ["o66nfc", "O66NFC", "miwear.watch.o66nfc", "M2456B1", "m2456b1"] {
+        for model in [
+            "o66nfc",
+            "O66NFC",
+            "miwear.watch.o66nfc",
+            "M2456B1",
+            "m2456b1",
+        ] {
             let target = identify(&packet("3.1.28", model), &c).unwrap();
             assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
             assert_eq!(target.firmware, "3.1.28");

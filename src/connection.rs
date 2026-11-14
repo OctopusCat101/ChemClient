@@ -112,7 +112,7 @@ pub enum Phase {
     #[default]
     Checking,
     Modules,
-    Installer(String),
+    WaitingForService(String),
     Ready,
     Failed(String),
 }
@@ -153,7 +153,6 @@ fn apply_devices(
         s.module_jobs.clear();
         s.install_id.clear();
         s.cloud_modules.clear();
-        s.installer_action = None;
         s.target.clear();
         s.native_delivery = false;
         s.bulk_delivery = false;
@@ -182,7 +181,6 @@ fn apply_devices(
         s.boot_status = 0;
         s.safe_exit_pending = false;
         s.module_detail.clear();
-        s.installer_action = None;
         s.delete_module.clear();
         s.manager_ready = false;
         s.manager_busy = false;
@@ -308,7 +306,6 @@ fn invalidate_device(s: &mut state::State, devices: Vec<(String, String)>) {
     s.direct = false;
     s.native_delivery = false;
     s.bulk_delivery = false;
-    s.installer_action = None;
     s.discovering = false;
     s.resident_revision = 0;
     s.resident_target.clear();
@@ -344,7 +341,6 @@ fn begin_check(s: &mut state::State, busy: bool) -> bool {
     s.discovering = true;
     s.manager_ready = false;
     s.direct = false;
-    s.installer_action = None;
     s.connection = Phase::Checking;
     true
 }
@@ -400,7 +396,6 @@ mod tests {
             resident_revision: 123,
             connection: Phase::Ready,
             connection_epoch: 7,
-            installer_action: Some(crate::bootstrap::InstallerAction::Install),
             song_job: Some(state::SongJob {
                 network: true,
                 ..Default::default()
@@ -414,7 +409,6 @@ mod tests {
         assert!(!s.manager_busy && !s.native_delivery && !s.bulk_delivery && !s.discovering);
         assert!(s.recheck_connection && s.song_job.as_ref().unwrap().cancel_requested);
         assert!(matches!(s.connection, Phase::Failed(_)));
-        assert_eq!(s.installer_action, None);
     }
     fn music() -> modules::Module {
         modules::Module {
