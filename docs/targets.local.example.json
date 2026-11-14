@@ -1,0 +1,15 @@
+{
+  "targets": [
+    {
+      "model": "xiaomi-band-10-nfc",
+      "firmware": "3.1.28",
+      "target": "xiaomi-band-10-nfc-3.1.28",
+      "firmware_sha256": "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845",
+      "device_ids": [
+        "o66nfc",
+        "miwear.watch.o66nfc",
+        "M2456B1"
+      ]
+    }
+  ]
+}

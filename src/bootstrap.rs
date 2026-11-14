@@ -17,6 +17,7 @@ struct Waiting {
     since: Instant,
     inspect: bool,
     inspected: bool,
+    local_only: bool,
 }
 impl Waiting {
     fn probe_failed(&mut self) -> bool {
@@ -46,6 +47,9 @@ struct Bootstrap {
     polling: bool,
     device_info: Option<Vec<u8>>,
     catalog: Option<cloud::Catalog>,
+    /// A precise "unsupported device" reason, kept so a later service-probe
+    /// timeout cannot replace it with a misleading "no Chem reply" message.
+    identification_error: Option<String>,
 }
 impl Bootstrap {
     fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog)> {
@@ -80,6 +84,7 @@ pub fn reset() {
         b.polling = false;
         b.device_info = None;
         b.catalog = None;
+        b.identification_error = None;
     });
 }
 pub fn connected() {
@@ -90,11 +95,26 @@ pub fn connected() {
     });
 }
 pub fn probe_failed(_error: &str) -> bool {
-    let retrying = with(|b| b.waiting.as_mut().is_some_and(Waiting::probe_failed));
+    let (retrying, local_only, unsupported) = with(|b| {
+        let unsupported = b.identification_error.is_some();
+        let local_only = b.waiting.as_ref().is_some_and(|w| w.local_only);
+        let retrying = b.waiting.as_mut().is_some_and(Waiting::probe_failed);
+        (retrying, local_only, unsupported)
+    });
+    // Identification happens after the first service probe has already been
+    // sent. If it fails, the bootstrap state machine was never armed; keep the
+    // exact firmware/model error on screen instead of reporting a nonexistent
+    // "Chem service did not reply" failure.
+    if unsupported {
+        return true;
+    }
     if retrying {
         state::with(|s| {
             s.connection = Phase::Installer(if s.installer_action.is_some() {
                 "Chem 尚未运行，请打开安装器并点击运行".into()
+            } else if local_only {
+                "已识别该设备，但未收到 Chem 服务回复；请确认手环已运行 Chem 安装器"
+                    .into()
             } else {
                 "暂未连接 Chem，正在重试…".into()
             });
@@ -121,13 +141,7 @@ fn identify(packet: &[u8], catalog: &cloud::Catalog) -> Result<cloud::Target, St
     // There is no required product field 5. Match the reported model itself.
     let firmware = string(info, 2, "固件版本")?;
     let model = string(info, 4, "型号")?;
-    catalog
-        .targets
-        .iter()
-        .find(|t| {
-            t.firmware == firmware && t.device_ids.iter().any(|id| id.eq_ignore_ascii_case(model))
-        })
-        .cloned()
+    cloud::identify_target(catalog, firmware, model)
         .ok_or_else(|| format!("暂不支持此手环固件：{model} {firmware}"))
 }
 pub async fn start(addr: &str) -> Result<(), String> {
@@ -202,7 +216,14 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
     let Some((reply, catalog)) = with(Bootstrap::take_ready) else {
         return Ok(());
     };
-    let target = identify(&reply, &catalog)?;
+    let target = match identify(&reply, &catalog) {
+        Ok(t) => t,
+        Err(e) => {
+            with(|b| b.identification_error = Some(e.clone()));
+            return Err(e);
+        }
+    };
+    let local_only = target.local_only;
     let s = state::snapshot();
     if !s.resident_target.is_empty() && s.resident_target != target.target {
         modules::reset_connection();
@@ -219,6 +240,12 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         s.expected_revision = target.loader.version;
         s.cloud_modules = target.modules.clone();
         s.native_delivery = !s.resident_target.is_empty() && s.resident_capabilities & 1 != 0;
+        if local_only {
+            s.cloud_notice = format!(
+                "已识别 {}：ChemCloud 尚未登记该设备，云端安装器与模块下载不可用；模块导入还需设备端启用原生传输。",
+                target.target
+            );
+        }
     });
     with(|b| {
         b.candidate = Some(Candidate {
@@ -251,6 +278,7 @@ fn installer_action(installed: Option<bool>) -> Option<InstallerAction> {
     }
 }
 fn wait(addr: &str, target: cloud::Target, queued: bool) {
+    let local_only = target.local_only;
     with(|b| {
         b.waiting = Some(Waiting {
             addr: addr.into(),
@@ -259,6 +287,7 @@ fn wait(addr: &str, target: cloud::Target, queued: bool) {
             since: Instant::now(),
             inspect: false,
             inspected: false,
+            local_only,
         });
         if !b.timer {
             timer::set_interval(2000, "chem-bootstrap");
@@ -274,6 +303,12 @@ fn download() -> Result<(), String> {
     let c = with(|b| b.candidate.clone()).ok_or("请先刷新设备信息")?;
     if c.addr != s.addr || !s.connected_devices.contains(&c.addr) {
         return Err("手环连接已变化，请刷新".into());
+    }
+    if c.target.local_only {
+        return Err(
+            "该设备尚未在 ChemCloud 登记，暂无可下载的 Chem 安装器；请先安装对应 .face 后刷新"
+                .into(),
+        );
     }
     cloud_download::loader(&c.addr, &c.target.loader.artifact)?;
     state::with(|s| s.installer_action = None);
@@ -378,7 +413,7 @@ pub async fn tick() {
         return;
     }
     if !s.active && !s.installing && !s.manager_busy && s.download.is_none() {
-        if w.inspect && !w.inspected {
+        if w.inspect && !w.inspected && !w.local_only {
             match watchface::get_watchface_list(w.addr.clone()).await {
                 Ok(faces) => {
                     if state::snapshot().addr != w.addr || state::snapshot().manager_ready {
@@ -490,6 +525,7 @@ mod tests {
             since: Instant::now(),
             inspect: false,
             inspected: false,
+            local_only: false,
         };
         assert!(!w.inspect);
         assert!(w.probe_failed());
@@ -554,6 +590,52 @@ mod tests {
         let reply = b"\x08\x02\x10\x02\x22\x13\x1a\x11\x12\x063.1.35\x22\x07M2346B1";
         let target = identify(reply, &cloud::fixture().unwrap()).unwrap();
         assert_eq!(target.target, "xiaomi-band-9-3.1.35");
+    }
+
+    #[test]
+    fn band10_nfc_is_identified_without_a_cloud_catalog_entry() {
+        // ChemCloud currently publishes only xiaomi-band-9-3.1.35. A Band 10
+        // NFC must still be identified, otherwise bootstrap never arms its
+        // retry state and a service probe timeout is reported as "no reply".
+        let c = cloud::fixture().unwrap();
+        for model in ["o66nfc", "O66NFC", "miwear.watch.o66nfc", "M2456B1", "m2456b1"] {
+            let target = identify(&packet("3.1.28", model), &c).unwrap();
+            assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
+            assert_eq!(target.firmware, "3.1.28");
+            assert_eq!(
+                target.firmware_sha256,
+                "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845"
+            );
+            assert!(target.local_only);
+            assert!(target.modules.is_empty());
+        }
+        // Identity stays exact: neither a wrong firmware nor a Band 9 model
+        // may resolve to the Band 10 target.
+        assert!(identify(&packet("3.1.35", "o66nfc"), &c).is_err());
+        assert!(identify(&packet("3.1.28", "n66tc"), &c).is_err());
+    }
+
+    #[test]
+    fn reported_hardware_model_m2456b1_3_1_28_is_supported() {
+        // Exact identity reported by a connected Xiaomi Band 10 NFC after the
+        // manager bridge was enabled: "暂不支持此手环固件：M2456B1 3.1.28".
+        // The device reports a hardware model, not the o66nfc codename.
+        let c = cloud::fixture().unwrap();
+        let target = identify(&packet("3.1.28", "M2456B1"), &c).unwrap();
+        assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
+        assert!(target.local_only);
+        // The hardware ID must not unlock a different firmware version.
+        assert!(identify(&packet("3.1.35", "M2456B1"), &c).is_err());
+        assert!(identify(&packet("3.1.28", "M2456B2"), &c).is_err());
+    }
+
+    #[test]
+    fn cloud_catalog_still_wins_over_local_identity() {
+        let c = cloud::fixture().unwrap();
+        let target = identify(&packet("3.1.35", "n66tc"), &c).unwrap();
+        assert_eq!(target.target, "xiaomi-band-9-3.1.35");
+        assert!(!target.local_only);
+        assert!(cloud::validate(&c).is_ok());
     }
 
     #[test]

@@ -34,11 +34,141 @@ pub struct Target {
     pub device_ids: Vec<String>,
     pub loader: Loader,
     pub modules: Vec<Module>,
+    /// True for targets known locally but not published in the cloud catalog.
+    /// Such a target can be identified and used with a locally imported
+    /// `.chem`, but has no downloadable loader or cloud modules. Never set by
+    /// the repository catalog (see `validate`).
+    #[serde(default, skip_serializing)]
+    pub local_only: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Catalog {
     pub schema: u32,
     pub targets: Vec<Target>,
+}
+
+/// A target the client can identify before ChemCloud publishes its artifacts.
+/// Keeping identity separate from the catalog lets a newly ported device reach
+/// the diagnostic/local-import path without inventing cloud download entries.
+pub struct KnownTarget {
+    pub model: &'static str,
+    pub firmware: &'static str,
+    pub target: &'static str,
+    pub firmware_sha256: &'static str,
+    pub device_ids: &'static [&'static str],
+}
+
+/// Exact-firmware identities shipped with the plugin. `firmware_sha256` is the
+/// SHA-256 of the device's `vela_ap.bin`; it is what `.chem` receipts bind to.
+pub const KNOWN_TARGETS: &[KnownTarget] = &[KnownTarget {
+    model: "xiaomi-band-10-nfc",
+    firmware: "3.1.28",
+    target: "xiaomi-band-10-nfc-3.1.28",
+    firmware_sha256: "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845",
+    device_ids: &[
+        "o66nfc",
+        "O66NFC",
+        "miwear.watch.o66nfc",
+        "miwear.watch.O66NFC",
+        "xiaomi.watch.o66nfc",
+        // System.DeviceInfo.model reports the hardware ID on a real device,
+        // not the firmware codename. Observed on a connected Band 10 NFC:
+        // "M2456B1 3.1.28". Band 9 does the same with "M2346B1".
+        // Only device-reported IDs go here; no guessed siblings.
+        "M2456B1",
+    ],
+}];
+
+#[derive(Deserialize)]
+struct LocalCatalog {
+    targets: Vec<LocalTarget>,
+}
+#[derive(Deserialize)]
+struct LocalTarget {
+    model: Option<String>,
+    firmware: String,
+    target: String,
+    firmware_sha256: String,
+    device_ids: Vec<String>,
+}
+
+fn known_target(t: &KnownTarget) -> Target {
+    Target {
+        model: t.model.into(),
+        firmware: t.firmware.into(),
+        target: t.target.into(),
+        firmware_sha256: t.firmware_sha256.into(),
+        device_ids: t.device_ids.iter().map(|s| (*s).into()).collect(),
+        loader: Loader::default(),
+        modules: Vec::new(),
+        local_only: true,
+    }
+}
+
+fn local_entry_ok(t: &Target) -> bool {
+    package::safe_name(&t.model, 64)
+        && package::safe_name(&t.firmware, 32)
+        && package::safe_name(&t.target, 47)
+        && hash(&t.firmware_sha256)
+        && !t.device_ids.is_empty()
+        && t.device_ids.len() <= 16
+        && t.device_ids.iter().all(|id| !id.is_empty() && id.len() <= 64)
+}
+
+/// Identity-only targets: built-ins first, then optional operator overrides
+/// from `data/targets.local.json`. A malformed file is ignored rather than
+/// breaking device discovery; the cloud catalog stays authoritative.
+pub fn local_targets() -> Vec<Target> {
+    let mut out: Vec<Target> = KNOWN_TARGETS.iter().map(known_target).collect();
+    if let Ok(bytes) = fs::read("data/targets.local.json") {
+        if bytes.len() <= 64 * 1024 {
+            if let Ok(parsed) = serde_json::from_slice::<LocalCatalog>(&bytes) {
+                for item in parsed.targets {
+                    let candidate = Target {
+                        model: item.model.unwrap_or_default(),
+                        firmware: item.firmware,
+                        target: item.target,
+                        firmware_sha256: item.firmware_sha256,
+                        device_ids: item.device_ids,
+                        loader: Loader::default(),
+                        modules: Vec::new(),
+                        local_only: true,
+                    };
+                    if !local_entry_ok(&candidate) {
+                        continue;
+                    }
+                    out.retain(|t| t.target != candidate.target);
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a reported (firmware, model) pair. Cloud targets win; local-only
+/// targets are a fallback and never supply downloadable artifacts.
+pub fn identify_target(catalog: &Catalog, firmware: &str, model: &str) -> Option<Target> {
+    catalog
+        .targets
+        .iter()
+        .find(|t| {
+            t.firmware == firmware
+                && t
+                    .device_ids
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(model))
+        })
+        .cloned()
+        .or_else(|| {
+            local_targets().into_iter().find(|t| {
+                t.firmware == firmware
+                    && t
+                        .device_ids
+                        .iter()
+                        .any(|id| id.eq_ignore_ascii_case(model))
+            })
+        })
 }
 #[derive(Deserialize)]
 struct Config {
@@ -78,6 +208,9 @@ pub fn validate(c: &Catalog) -> Result<(), String> {
             || !hash(&t.firmware_sha256)
             || t.device_ids.is_empty()
             || t.device_ids.len() > 16
+            // local_only is a client-side identity fallback, never a cloud
+            // catalog property. Reject it so a mirror cannot disable downloads.
+            || t.local_only
             || !targets.insert(t.target.clone())
             || t.modules.len() > 64
             || t.loader.face_id.len() != 9
@@ -131,6 +264,26 @@ pub fn fixture() -> Result<Catalog, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_only_is_rejected_in_cloud_catalogs() {
+        let mut c = fixture().unwrap();
+        c.targets[0].local_only = true;
+        assert!(validate(&c).is_err());
+    }
+    #[test]
+    fn builtin_band10_nfc_identity_is_exact_and_has_no_cloud_artifacts() {
+        let t = local_targets()
+            .into_iter()
+            .find(|t| t.target == "xiaomi-band-10-nfc-3.1.28")
+            .unwrap();
+        assert_eq!(t.firmware, "3.1.28");
+        assert!(t.local_only);
+        assert!(t.modules.is_empty());
+        assert!(t.loader.artifact.path.is_empty());
+        assert!(t.device_ids.iter().any(|id| id == "miwear.watch.o66nfc"));
+        assert!(t.device_ids.iter().any(|id| id == "M2456B1"));
+        assert!(hash(&t.firmware_sha256));
+    }
     #[test]
     fn catalog_checks_paths_hashes_and_unique_targets() {
         let catalog = fixture().unwrap();
