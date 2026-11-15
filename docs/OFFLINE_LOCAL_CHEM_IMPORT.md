@@ -40,7 +40,10 @@
 - `modules.rs`：op=9 的 `native_delivery` 同样解耦云端哈希。
 - `ui.rs`：把按钮禁用条件抽成 `chem_import_blocked()`，逻辑不变；
   新增单测覆盖「离线 + 清单读取中」仍可点击、「无原生传输能力」仍禁用。
-- 版本 `1.7.34` → `1.7.35`。
+- 版本最终为 **`1.7.36`**（dev 已占用 1.7.35）。本轮先把 dev 的新架构
+  （去掉 `InstallerAction` / watchface 安装、`Phase::WaitingForService`、
+  `LayoutIdentity`）同步到本地，再在其上重新实现离线改动，因此推送后
+  源码与 `dist/chemclient.wasm` 是同一次构建产物。
 
 **没有放宽安全校验**：`.chem` 收据仍按内置精确身份里的
 `target = xiaomi-band-10-nfc-3.1.28` 与
@@ -58,20 +61,19 @@
 
 ## 验证
 
-- `cargo test --target x86_64-pc-windows-gnu`：**75 passed / 0 failed**，
-  含新增 `failed_catalog_still_resolves_builtin_identity_for_local_chem` 与
+- `cargo test --target x86_64-pc-windows-gnu`（dev 新架构 + 本改动）：
+  **76 passed / 0 failed**，含
+  `failed_catalog_still_resolves_builtin_identity_for_local_chem` 与
   `offline_catalog_does_not_disable_local_chem_import`；原
   `session_snapshot_connects_without_catalog_and_ignores_stale_replies`
-  的断言已改为「能力位决定 `native_delivery`」，不再假设无 catalog 必禁用。
+  的断言改为「能力位决定 `native_delivery`」。
 - `python build.py --abp`：`PASS: API 4 / WASI 2 component, manifest, PNG
   and resource layout`；ABP 内 4 个文件与 dist 逐字节一致。
 
-产物（插件版本 `1.7.35`）：
+产物（插件版本 `1.7.36`）：`dist/ChemClient.abp` 601 KB 级、
+`dist/chemclient.wasm` 1,613,212 B（SHA
+`6dc3d995ebfd2409577cf91d65c0acfec3878c873558fdf44431110a97b5ef41`）。
 
-| 文件 | 大小 | SHA-256 |
-|---|---|---|
-| `dist/ChemClient.abp` | 603,286 B | `33e6ee4fd0acd125371113dbcc3b976da4e550f236884676c45792cc70417e83` |
-| `dist/chemclient.wasm` | 1,629,824 B | `ac9ca0e8ca58da523e4250e8611a8512f98c662dda75b446c7a2675cbf3eafb9` |
-
-改动仅在本机工作区，**未 commit、未 push**；未在 AstroBox 宿主实机点击验证。
-构建时有一条既有的 `class` / `version_name` 未使用警告，与本次改动无关。
+2026-11-15 已通过 GitHub API 推送到 `OctopusCat101/ChemClient` 的 main，
+commit `008f9b0915fd`；以 dev 当前 tree 为 base，只提交 7 个改动文件，
+未覆盖任何其他人的提交。未在 AstroBox 宿主实机点击验证。
