@@ -10,6 +10,20 @@ struct Retry {
     music: Instant,
     devices: crate::retry::RetryClock,
     checking_devices: bool,
+    missing: u8,
+    missing_since: Option<Instant>,
+    last_reply: Option<Instant>,
+    epoch: Option<u64>,
+}
+impl Retry {
+    fn observe_epoch(&mut self, epoch: u64) {
+        if self.epoch != Some(epoch) {
+            self.epoch = Some(epoch);
+            self.missing = 0;
+            self.missing_since = None;
+            self.last_reply = None;
+        }
+    }
 }
 static RETRY: OnceLock<Mutex<Retry>> = OnceLock::new();
 fn retries() -> &'static Mutex<Retry> {
@@ -19,6 +33,10 @@ fn retries() -> &'static Mutex<Retry> {
             music: Instant::now(),
             devices: Default::default(),
             checking_devices: false,
+            missing: 0,
+            missing_since: None,
+            last_reply: None,
+            epoch: None,
         })
     })
 }
@@ -37,8 +55,29 @@ pub fn opened() {
 
 pub use crate::deadline::bounded;
 
+pub fn reply_received() {
+    let epoch = state::snapshot().connection_epoch;
+    let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
+    last.observe_epoch(epoch);
+    last.last_reply = Some(Instant::now());
+    last.missing = 0;
+    last.missing_since = None;
+}
+fn task_busy(s: &state::State) -> bool {
+    s.active
+        || s.installing
+        || s.transcoding
+        || s.manager_busy
+        || state::action_busy()
+        || transfer::busy()
+        || crate::magic::busy()
+}
+
 pub async fn tick() {
     let s = state::snapshot();
+    if s.discovering || task_busy(&s) {
+        return;
+    }
     if !s.addr.is_empty() && !s.discovering {
         let check = {
             let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
@@ -258,13 +297,14 @@ pub async fn refresh(force: bool) {
 
 pub async fn device_event() {
     let current = state::snapshot();
+    if task_busy(&current) {
+        state::with(|s| s.recheck_connection = true);
+        return;
+    }
     let devices = match bounded(5000, device::get_connected_device_list()).await {
         Ok(devices) => devices,
         Err(error) => {
-            if state::snapshot().connection_epoch == current.connection_epoch {
-                disconnect(vec![]);
-                failed(error);
-            }
+            tracing::warn!("device list unavailable, retaining session: {error}");
             return;
         }
     };
@@ -272,6 +312,11 @@ pub async fn device_event() {
         return;
     }
     if devices.iter().any(|device| device.addr == current.addr) {
+        let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
+        last.observe_epoch(current.connection_epoch);
+        last.missing = 0;
+        last.missing_since = None;
+        drop(last);
         state::with(|s| {
             s.connected_devices = devices.iter().map(|d| d.addr.clone()).collect();
             s.devices = devices
@@ -279,8 +324,7 @@ pub async fn device_event() {
                 .map(|d| (d.addr.clone(), d.name.clone()))
                 .collect();
         });
-        if !current.manager_ready && !current.manager_busy && !current.active && !current.installing
-        {
+        if !current.manager_ready && !task_busy(&current) {
             let _ = modules::connect_device(&current.addr).await;
         }
         return;
@@ -288,6 +332,24 @@ pub async fn device_event() {
     if current.addr.is_empty() && devices.is_empty() {
         return;
     }
+    let confirmed = {
+        let mut last = retries().lock().unwrap_or_else(|e| e.into_inner());
+        last.observe_epoch(current.connection_epoch);
+        last.missing = last.missing.saturating_add(1);
+        let since = *last.missing_since.get_or_insert_with(Instant::now);
+        last.missing >= 3
+            && since.elapsed() >= Duration::from_secs(6)
+            && last
+                .last_reply
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(6))
+    };
+    if !confirmed {
+        return;
+    }
+    tracing::warn!(
+        "device absent in consecutive host snapshots: {}",
+        current.addr
+    );
     disconnect(
         devices
             .iter()
@@ -327,8 +389,9 @@ fn disconnect(devices: Vec<(String, String)>) {
     if crate::delivery::busy() {
         crate::delivery::fail("手环已断开，安装未完成，请重新连接后重试".into());
     }
-    crate::transcode::cancel();
-    transfer::disconnected();
+    if !state::snapshot().transcoding {
+        transfer::disconnected();
+    }
     ui::rerender();
 }
 
@@ -348,8 +411,10 @@ fn begin_check(s: &mut state::State, busy: bool) -> bool {
 // A host disconnect/reconnect during import is checked as soon as the current
 // operation finishes, rather than resetting its pending request or file handle.
 pub async fn check_pending() {
-    if state::with(|s| s.recheck_connection) {
-        refresh(false).await;
+    let s = state::snapshot();
+    if s.recheck_connection && !s.discovering && !task_busy(&s) {
+        state::with(|s| s.recheck_connection = false);
+        device_event().await;
     }
 }
 
@@ -413,7 +478,7 @@ mod tests {
     fn music() -> modules::Module {
         modules::Module {
             id: "bluetooth_audio".into(),
-            state: 8,
+            state: 9,
             intent: 1,
             ..Default::default()
         }

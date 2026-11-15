@@ -29,6 +29,16 @@ pub fn start(source: String, song: Value, temporary: bool) -> Result<(), String>
         return Err("请先完成当前导入".into());
     }
     let snapshot = state::snapshot();
+    if !snapshot.music_connected() {
+        crate::prepared::retain(
+            source,
+            song,
+            temporary,
+            snapshot.addr,
+            crate::prepared::Stage::Convert(0, true),
+        );
+        return Ok(());
+    }
     if !snapshot.direct || !snapshot.sbc_supported {
         return Err("请更新手环 NoirMusic 并重新连接后使用 SBC 预解码".into());
     }
@@ -65,7 +75,7 @@ pub fn start(source: String, song: Value, temporary: bool) -> Result<(), String>
         s.sent = 0;
         s.total = size;
         s.speed = 0;
-        s.status = "正在预解码为 SBC".into();
+        s.notice(state::NoticeOwner::Music, "正在预解码为 SBC");
     });
     ui::rerender();
     Ok(())
@@ -96,7 +106,7 @@ pub fn cancel() -> bool {
     state::with(|s| {
         s.active = false;
         s.transcoding = false;
-        s.status = "已取消预解码".into();
+        s.notice(state::NoticeOwner::Music, "已取消预解码");
         if let Some(job) = &mut s.song_job {
             job.message = s.status.clone();
         }

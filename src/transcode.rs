@@ -49,16 +49,41 @@ struct Job {
 thread_local! { static JOB: RefCell<Option<Job>> = const { RefCell::new(None) }; }
 
 pub async fn start(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
+    start_options(path, song, temporary, quality, state::snapshot().predecode).await
+}
+pub async fn start_options(
+    path: String,
+    song: Value,
+    temporary: bool,
+    quality: u32,
+    predecode: bool,
+) -> Result<(), String> {
+    let s = state::snapshot();
+    if !s.music_connected() {
+        crate::prepared::retain(
+            path,
+            song,
+            temporary,
+            s.addr,
+            crate::prepared::Stage::Convert(quality, predecode),
+        );
+        return Ok(());
+    }
     let assets = song.clone();
-    let result = begin(path, song, temporary, quality).await;
+    let result = begin(path, song, temporary, quality, predecode).await;
     if result.is_err() {
         crate::attachments::cleanup(&assets);
     }
     result
 }
-async fn begin(path: String, song: Value, temporary: bool, quality: u32) -> Result<(), String> {
+async fn begin(
+    path: String,
+    song: Value,
+    temporary: bool,
+    quality: u32,
+    predecode: bool,
+) -> Result<(), String> {
     let quality = profile(quality);
-    let predecode = state::snapshot().predecode;
     if predecode && !state::snapshot().sbc_supported {
         return Err("请更新手环 NoirMusic 并重新连接后使用 SBC 预解码".into());
     }
@@ -148,7 +173,7 @@ async fn begin(path: String, song: Value, temporary: bool, quality: u32) -> Resu
         s.sent = offset;
         s.total = size;
         s.speed = 0;
-        s.status = "正在压缩音频".into();
+        s.notice(state::NoticeOwner::Music, "正在压缩音频");
     });
     ui::rerender();
     Ok(())
@@ -254,7 +279,7 @@ pub fn cancel() -> bool {
     state::with(|s| {
         s.transcoding = false;
         s.active = false;
-        s.status = "已取消压缩".into();
+        s.notice(state::NoticeOwner::Music, "已取消压缩");
         if let Some(job) = &mut s.song_job {
             job.message = s.status.clone();
         }
@@ -300,7 +325,7 @@ pub async fn tick() {
         let render = j.last_render.elapsed().as_millis() >= 400;
         if render {
             state::with(|s| {
-                s.sent = j.bytes;
+                s.sent = j.bytes.saturating_sub((j.end - j.start) as u64);
                 s.total = j.size;
             });
             j.last_render = Instant::now();

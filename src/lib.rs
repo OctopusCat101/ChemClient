@@ -14,6 +14,7 @@ mod modules;
 mod netease;
 mod network;
 mod package;
+mod prepared;
 mod protocol;
 mod retry;
 mod sbc;
@@ -21,6 +22,7 @@ mod state;
 mod transcode;
 mod transfer;
 mod ui;
+mod wire;
 wit_bindgen::generate!({ path: "wit", world: "chem-client", generate_all });
 struct ChemClient;
 impl lifecycle::Guest for ChemClient {
@@ -60,7 +62,10 @@ impl event::Guest for ChemClient {
                     "magic-link" => magic::tick().await,
                     "chem-manager" => modules::tick().await,
                     "chem-download" => cloud_download::tick().await,
-                    "chem-connection" => connection::tick().await,
+                    "chem-connection" => {
+                        connection::tick().await;
+                        prepared::tick().await;
+                    }
                     _ => {}
                 }
                 connection::check_pending().await;

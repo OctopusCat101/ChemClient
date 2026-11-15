@@ -63,6 +63,28 @@ pub struct SongJob {
     pub cancel_requested: bool,
     pub message: String,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoticeOwner {
+    #[default]
+    Modules,
+    Music,
+    Local,
+    Cloud,
+    Library,
+    Magic,
+}
+impl NoticeOwner {
+    pub fn visible_in(self, tab: &str) -> bool {
+        match self {
+            Self::Modules => tab == "modules",
+            Self::Music => matches!(tab, "local" | "cloud" | "library"),
+            Self::Local => tab == "local",
+            Self::Cloud => tab == "cloud",
+            Self::Library => tab == "library",
+            Self::Magic => tab == "magic",
+        }
+    }
+}
 #[derive(Clone, Default)]
 pub struct State {
     pub root: Option<String>,
@@ -103,6 +125,7 @@ pub struct State {
     pub install_id: String,
     pub module_jobs: Vec<ModuleJob>,
     pub status: String,
+    pub status_owner: NoticeOwner,
     pub pending_action: String,
     pub query: String,
     pub results: Vec<CloudSong>,
@@ -128,6 +151,10 @@ pub struct State {
     pub transcoding: bool,
 }
 impl State {
+    pub fn notice(&mut self, owner: NoticeOwner, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_owner = owner;
+    }
     pub fn device_connected(&self) -> bool {
         !self.addr.is_empty() && self.connected_devices.contains(&self.addr)
     }
@@ -190,7 +217,7 @@ pub fn error(e: String) {
             job.message = e.clone();
             job.network = false;
         }
-        s.status = e;
+        s.notice(NoticeOwner::Music, e);
         s.active = false;
     });
 }

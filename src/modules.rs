@@ -37,7 +37,7 @@ impl Module {
         self.id == "bluetooth_audio"
     }
     pub fn importable(&self) -> bool {
-        self.music() && self.intent == 1 && self.error == 0 && matches!(self.state, 8 | 9 | 13)
+        self.music() && self.intent == 1 && self.error == 0 && matches!(self.state, 9 | 13)
     }
     pub fn status(&self) -> String {
         if self.flags & 4 != 0 {
@@ -79,6 +79,7 @@ struct Pending {
     full_sent: Instant,
     polls: u8,
     background: bool,
+    send_failed: bool,
 }
 #[derive(Default)]
 struct Link {
@@ -90,6 +91,7 @@ struct Link {
     sequence: Option<u32>,
     restarts: u8,
     resyncs: u8,
+    failures: u8,
 }
 static LINK: OnceLock<Mutex<Link>> = OnceLock::new();
 fn link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
@@ -215,10 +217,11 @@ async fn send_inner(op: u32, data: Vec<u8>, background: bool) -> Result<(), Stri
             frame: b.clone(),
             start: Instant::now(),
             sent: Instant::now(),
-            sending: true,
+            sending: false,
             full_sent: Instant::now(),
             polls: 0,
             background,
+            send_failed: false,
         });
         Ok((id, b))
     })?;
@@ -226,8 +229,25 @@ async fn send_inner(op: u32, data: Vec<u8>, background: bool) -> Result<(), Stri
     transmit(addr, id, b).await
 }
 async fn transmit(addr: String, id: u32, b: Vec<u8>) -> Result<(), String> {
+    let epoch = state::snapshot().connection_epoch;
+    if !link(|l| {
+        let Some(p) = l.pending.as_mut().filter(|p| p.id == id && !p.sending) else {
+            return false;
+        };
+        p.sending = true;
+        true
+    }) {
+        return Ok(());
+    }
+    let _write = crate::wire::acquire().await;
+    if state::snapshot().connection_epoch != epoch
+        || !link(|l| l.pending.as_ref().is_some_and(|p| p.id == id))
+    {
+        return Ok(());
+    }
+    let budget = if b.len() > 1024 { 30000 } else { 8000 };
     let result = connection::bounded(
-        5000,
+        budget,
         transport::send(addr, protocol::encode_package(PACKAGE, &b)),
     )
     .await
@@ -243,18 +263,28 @@ async fn transmit(addr: String, id: u32, b: Vec<u8>) -> Result<(), String> {
     });
     if let Err(e) = result {
         if current {
-            let message = format!("管理消息发送失败：{e}");
-            fail(message.clone());
-            return Err(message);
+            tracing::warn!("manager send {id} deferred after host error: {e}");
+            link(|l| {
+                if let Some(p) = l.pending.as_mut().filter(|p| p.id == id) {
+                    p.send_failed = true;
+                }
+            });
         }
     }
     Ok(())
 }
 fn fail(error: String) {
-    link(|l| {
+    let retain = link(|l| {
+        let background = l.pending.as_ref().is_some_and(|p| p.background);
         l.pending = None;
         l.rows.clear();
+        l.failures = l.failures.saturating_add(1);
+        background && l.failures < 3
     });
+    if retain && state::snapshot().manager_ready {
+        tracing::warn!("background manager probe missed, retaining session: {error}");
+        return;
+    }
     state::with(|s| {
         s.manager_busy = false;
         s.manager_ready = false;
@@ -263,6 +293,7 @@ fn fail(error: String) {
     if crate::delivery::busy() {
         crate::delivery::fail(error.clone());
     }
+    crate::magic::transport_failed(&error);
     if !crate::bootstrap::probe_failed(&error) {
         connection::failed(error);
     }
@@ -272,6 +303,7 @@ pub fn reset_connection() {
         l.pending = None;
         l.rows.clear();
         l.sequence = None;
+        l.failures = 0;
     });
 }
 pub async fn connect_device(addr: &str) -> Result<(), String> {
@@ -363,7 +395,10 @@ pub async fn mutate(id: &str, op: u32) -> Result<(), String> {
 pub async fn tick() {
     let pending = link(|l| {
         let p = l.pending.as_mut()?;
-        let timeout = if p.op == 9 { 3 } else { 10 };
+        if p.sending {
+            return None;
+        }
+        let timeout = if p.op == 9 { 12 } else { 60 };
         if p.start.elapsed().as_secs() >= timeout {
             return Some(Err(()));
         }
@@ -377,9 +412,12 @@ pub async fn tick() {
         if p.sending || p.sent.elapsed().as_millis() < delay {
             return None;
         }
-        p.sending = true;
-        let b = if p.full_sent.elapsed().as_millis() >= 1000 {
+        let retry_ms = if p.frame.len() > 1024 { 12000 } else { 3000 };
+        let b = if p.full_sent.elapsed().as_millis() >= retry_ms
+            || (p.send_failed && p.sent.elapsed().as_millis() >= 2000)
+        {
             p.full_sent = Instant::now();
+            p.send_failed = false;
             p.frame.clone()
         } else {
             p.polls = p.polls.saturating_add(1);
@@ -428,7 +466,11 @@ pub async fn received(payload: &str) {
     let Some((result, mut data)) = parse_response(b, id, op) else {
         return;
     };
-    link(|l| l.pending = None);
+    link(|l| {
+        l.pending = None;
+        l.failures = 0;
+    });
+    connection::reply_received();
     state::with(|s| s.manager_busy = false);
     if let Some(horizon) = sequence_horizon(result, data).filter(|_| op == 9) {
         let retry = link(|l| resync_sequence(l, horizon));
@@ -451,7 +493,7 @@ pub async fn received(payload: &str) {
     }
     if matches!(op, 19 | 20 | 22) && result != 5 && result != 8 {
         let error = word(data, if op == 20 { 4 } else { 0 }).unwrap_or(0) as i32;
-        state::with(|s| s.status = setting_error(op, error));
+        state::with(|s| s.notice(state::NoticeOwner::Modules, setting_error(op, error)));
         ui::rerender();
         return;
     }
@@ -461,7 +503,7 @@ pub async fn received(payload: &str) {
             word(b, 36).unwrap_or(0) as i32
         );
         if state::snapshot().manager_ready {
-            state::with(|s| s.status = error);
+            state::with(|s| s.notice(state::NoticeOwner::Modules, error));
             ui::rerender();
         } else {
             fail(error);
@@ -477,6 +519,7 @@ pub async fn received(payload: &str) {
             s.boot_status = word(data, 0).unwrap_or(0);
             s.safe_exit_pending = s.boot_status & 4 != 0;
             if op == 20 {
+                s.status_owner = state::NoticeOwner::Modules;
                 s.status = if s.boot_status & 2 != 0 {
                     "自动启动已开启"
                 } else {
@@ -603,6 +646,7 @@ pub async fn received(payload: &str) {
         state::with(|s| {
             s.manager_busy = false;
             s.delete_module.clear();
+            s.status_owner = state::NoticeOwner::Modules;
             s.status = if op == 22 {
                 "恢复设置已保存，请重启手环"
             } else if s.boot_status & 2 != 0 {
@@ -657,6 +701,22 @@ fn parse_list(b: &[u8]) -> Option<(u32, u32, Vec<Module>)> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ready_image_is_not_a_running_music_service() {
+        let mut m = super::Module {
+            id: "bluetooth_audio".into(),
+            intent: 1,
+            state: 8,
+            ..Default::default()
+        };
+        assert!(!m.importable());
+        for state in [9, 13] {
+            m.state = state;
+            assert!(m.importable());
+        }
+        m.error = -20;
+        assert!(!m.importable());
+    }
     #[test]
     fn lost_sequence_recovers_durably_across_wrap_and_is_bounded() {
         let hint = [0x43, 0x53, 0x51, 0x31, 0x50, 0xc3, 0, 0];
@@ -744,6 +804,7 @@ mod tests {
                 full_sent: Instant::now(),
                 polls: 0,
                 background: false,
+                send_failed: false,
             })
         });
         complete(received(&packet));
@@ -773,6 +834,7 @@ mod tests {
             full_sent: Instant::now(),
             polls: 0,
             background: true,
+            send_failed: false,
         };
         link(|l| l.pending = Some(pending()));
         complete(received(&packet));

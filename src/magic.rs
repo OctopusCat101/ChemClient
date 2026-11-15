@@ -7,9 +7,15 @@ use std::{
 };
 
 const ID: &str = "com.chem.magic";
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pack {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+}
 #[derive(Clone, Default)]
 pub struct View {
-    pub rows: Vec<(String, bool)>,
+    pub rows: Vec<Pack>,
     pub busy: bool,
     pub sent: u64,
     pub total: u64,
@@ -59,13 +65,17 @@ fn with<R>(f: impl FnOnce(&mut Link) -> R) -> R {
 pub fn snapshot() -> View {
     with(|l| l.view.clone())
 }
+#[cfg(test)]
+pub fn test_view(view: View) {
+    with(|l| l.view = view);
+}
 pub fn busy() -> bool {
     with(|l| l.view.busy)
 }
 fn word(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
-fn list_row(b: &[u8], index: u32) -> Result<Option<(String, bool)>, String> {
+fn list_row(b: &[u8], index: u32) -> Result<Option<Pack>, String> {
     let count = word(b, 16).ok_or("资源包列表格式无效")?;
     if count > 16 {
         return Err("资源包列表格式无效".into());
@@ -86,7 +96,24 @@ fn list_row(b: &[u8], index: u32) -> Result<Option<(String, bool)>, String> {
     if text.is_empty() || text.chars().any(char::is_control) {
         return Err("资源包名称无效".into());
     }
-    Ok(Some((text.to_owned(), b[28] != 0)))
+    let folder = &b[29..94];
+    let end = folder
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or("资源包标识无效")?;
+    let id = std::str::from_utf8(&folder[..end]).map_err(|_| "资源包标识无效")?;
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err("资源包标识无效".into());
+    }
+    Ok(Some(Pack {
+        id: id.into(),
+        name: text.into(),
+        enabled: b[28] != 0,
+    }))
 }
 fn finish(message: String) {
     with(|l| {
@@ -115,7 +142,7 @@ fn begin_session(step: Step) -> Result<(), String> {
         || !s
             .modules
             .iter()
-            .any(|m| m.id == ID && m.intent == 1 && m.error == 0 && matches!(m.state, 8 | 9 | 13))
+            .any(|m| m.id == ID && m.intent == 1 && m.error == 0 && matches!(m.state, 9 | 13))
     {
         return Err("请先启用 Magic 并等待连接完成".into());
     }
@@ -215,6 +242,11 @@ pub fn disconnected() {
         finish("手环已断开，请重新连接后重试".into());
     }
 }
+pub fn transport_failed(error: &str) {
+    if busy() {
+        finish(error.into());
+    }
+}
 
 fn management_error(result: u32, data: &[u8]) -> Option<String> {
     if result == 5 && data == [0] {
@@ -222,7 +254,7 @@ fn management_error(result: u32, data: &[u8]) -> Option<String> {
     }
     Some(match data {
         [1] => "Magic 尚未加载，请在模块列表启用后重试".into(),
-        [2] => "Magic 未启动通信服务，请重新启用模块".into(),
+        [2] => "Magic 通信监听未注册，请更新 Chem 与 Magic 后重启手环".into(),
         [3] => "通信会话已满，请重新连接手环".into(),
         [5] => "模块收到请求但未返回应答，请更新 Magic 模块并重启".into(),
         [4] => "Chem 不支持此模块的通信请求，请安装最新的 Chem 安装器并重启".into(),
@@ -286,7 +318,7 @@ pub async fn tick() {
     let timeout = with(|l| {
         l.pending
             .as_ref()
-            .is_some_and(|p| p.started.elapsed().as_secs() > 10)
+            .is_some_and(|p| p.started.elapsed().as_secs() > 75)
     });
     if timeout {
         finish("Magic 未返回数据，请刷新重试".into());
@@ -442,7 +474,7 @@ mod tests {
     fn management_errors_distinguish_module_listener_and_protocol() {
         assert_eq!(management_error(5, &[0]), None);
         assert!(management_error(3, &[1]).unwrap().contains("尚未加载"));
-        assert!(management_error(3, &[2]).unwrap().contains("通信服务"));
+        assert!(management_error(3, &[2]).unwrap().contains("通信监听"));
         assert!(management_error(1, &[4]).unwrap().contains("安装器"));
         assert!(management_error(5, &[]).is_some());
         assert!(management_error(1, &[0]).is_some());
@@ -468,7 +500,15 @@ mod tests {
         put(&mut b, 16, 1);
         b[28] = 1;
         b[94..99].copy_from_slice(b"Alpha");
-        assert_eq!(list_row(&b, 0).unwrap(), Some(("Alpha".into(), true)));
+        b[29..34].copy_from_slice(b"alpha");
+        assert_eq!(
+            list_row(&b, 0).unwrap(),
+            Some(Pack {
+                id: "alpha".into(),
+                name: "Alpha".into(),
+                enabled: true
+            })
+        );
         for n in 0..b.len() {
             assert!(list_row(&b[..n], 0).is_err());
         }

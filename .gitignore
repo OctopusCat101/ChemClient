@@ -1,4 +1,5 @@
 /out/
+/output/playwright/
 /target/
 /dist/*.abp
 __pycache__/

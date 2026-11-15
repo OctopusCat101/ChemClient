@@ -1,19 +1,24 @@
 //! Fluid Material 3 views built from API 4 native HTML primitives.
+#[cfg(not(test))]
+use crate::astrobox::psys_host_v4::ui;
 use crate::{
-    astrobox::psys_host_v4::{dialog, ui},
-    attachments, cloud_download, connection, delivery, modules, netease, state, transcode,
-    transfer,
+    astrobox::psys_host_v4::dialog, attachments, cloud_download, connection, delivery, modules,
+    netease, state, transcode, transfer,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use qrcode::{QrCode, render::svg};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
+    panic::Location,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+#[path = "ui_test_host.rs"]
+mod ui;
 const INK: &str = "#E0E4E0";
 const PRIMARY: &str = "#A0D0BE";
 const MUTED: &str = "#BEC9C3";
@@ -25,22 +30,61 @@ thread_local! {
 }
 #[derive(Default)]
 struct LayoutIdentity {
+    page: String,
+    generation: u64,
     scope: String,
     positions: HashMap<String, u32>,
+    used: HashSet<String>,
 }
 impl LayoutIdentity {
     fn key(&self, key: &str) -> String {
-        format!("{}:{key}", self.scope)
+        format!("{}|{}|{key}", self.page, self.scope)
     }
+    #[track_caller]
     fn next(&mut self, kind: ui::ElementType) -> String {
-        let position = self.positions.entry(self.scope.clone()).or_default();
+        let site = Location::caller();
+        let slot = format!("{}:{}:{}:{kind:?}", site.file(), site.line(), site.column());
+        let position = self.positions.entry(self.key(&slot)).or_default();
         *position += 1;
-        format!("layout:{position}:{kind:?}")
+        format!("layout:{slot}:{position}")
     }
 }
 fn scope(key: &str) {
     UI_LAYOUT.with(|layout| layout.borrow_mut().scope = key.into());
 }
+fn event_id(event: &str) -> String {
+    UI_LAYOUT.with(|layout| format!("view:{}:{event}", layout.borrow().generation))
+}
+fn current_page(s: &state::State) -> (&str, String) {
+    let tab = if s.tab == "module-uploader" {
+        uploader_tab(s, &s.module_detail)
+    } else {
+        &s.tab
+    };
+    let tab = match tab {
+        "modules" | "local" | "cloud" | "library" | "magic" | "module-uploader" => tab,
+        _ => "modules",
+    };
+    let page = format!(
+        "{}|{tab}:{}",
+        s.root.as_deref().unwrap_or_default(),
+        if tab == "module-uploader" {
+            &s.module_detail
+        } else {
+            ""
+        }
+    );
+    (tab, page)
+}
+fn visible_event<'a>(id: &'a str, s: &state::State) -> Option<&'a str> {
+    let (generation, event) = id.strip_prefix("view:")?.split_once(':')?;
+    let generation: u64 = generation.parse().ok()?;
+    UI_LAYOUT.with(|layout| {
+        let layout = layout.borrow();
+        (layout.generation == generation && layout.page == current_page(s).1).then_some(event)
+    })
+}
+#[track_caller]
 fn layout_node(kind: ui::ElementType, content: Option<&str>) -> ui::Element {
     let key = UI_LAYOUT.with(|layout| layout.borrow_mut().next(kind));
     stable_node(kind, content, &key)
@@ -48,7 +92,12 @@ fn layout_node(kind: ui::ElementType, content: Option<&str>) -> ui::Element {
 // Host builders clone borrowed elements with their ID intact. Cache childless
 // prototypes so refreshing keeps node identity without accumulating children.
 fn stable_node(kind: ui::ElementType, content: Option<&str>, key: &str) -> ui::Element {
-    let key = UI_LAYOUT.with(|layout| layout.borrow().key(key));
+    let key = UI_LAYOUT.with(|layout| {
+        let mut layout = layout.borrow_mut();
+        let key = layout.key(&format!("{kind:?}:{key}"));
+        layout.used.insert(key.clone());
+        key
+    });
     UI_NODES.with(|nodes| {
         let mut nodes = nodes.borrow_mut();
         let prototype = nodes
@@ -70,6 +119,7 @@ fn fixed_box(el: ui::Element, width: u32, height: u32) -> ui::Element {
         .transition("none")
         .transform("none")
 }
+#[track_caller]
 fn text(s: &str, size: u32, color: &str) -> ui::Element {
     // URL/file-name tokens must break even on hosts without overflow-wrap.
     let mut wrapped = String::with_capacity(s.len());
@@ -93,6 +143,7 @@ fn text(s: &str, size: u32, color: &str) -> ui::Element {
         .min_width(0)
         .margin(0)
 }
+#[track_caller]
 fn column() -> ui::Element {
     layout_node(ui::ElementType::Div, None)
         .flex()
@@ -130,6 +181,7 @@ fn progress_bar(percent: u64) -> ui::Element {
 }
 // The host renders every child of a raw root as plain HTML. GRID does not
 // imply display:grid there; use explicit flex layout for every horizontal group.
+#[track_caller]
 fn equal_row() -> ui::Element {
     row().gap(8).width_full()
 }
@@ -158,8 +210,7 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
     .text_color(if primary { "#00382A" } else { INK })
     .size(14)
     .flex_shrink(0.0)
-    .prop("key", event)
-    .on(ui::Event::Click, event);
+    .on(ui::Event::Click, &event_id(event));
     disabled(el, button_blocked(&state::snapshot(), event))
 }
 fn independent_action(event: &str) -> bool {
@@ -233,7 +284,7 @@ fn toggle_switch(key: &str, label: &str, event: &str, enabled: bool, busy: bool)
         .prop("role", "switch")
         .prop("aria-label", label)
         .prop("aria-checked", if enabled { "true" } else { "false" })
-        .on(ui::Event::Click, event);
+        .on(ui::Event::Click, &event_id(event));
     let knob = fixed_box(
         stable_node(ui::ElementType::Div, None, &format!("{key}:knob")),
         24,
@@ -266,7 +317,6 @@ fn input(label: &str, value: &str, event: &str) -> ui::Element {
         .border(1, "#89938D")
         .prop("placeholder", label)
         .prop("default-value", value)
-        .prop("key", event)
         .min_width(0)
         .padding_top(12)
         .padding_bottom(12)
@@ -275,11 +325,13 @@ fn input(label: &str, value: &str, event: &str) -> ui::Element {
         .radius(4)
         .bg("#252B27")
         .text_color(INK)
-        .on(ui::Event::Input, event)
+        .on(ui::Event::Input, &event_id(event))
 }
+#[track_caller]
 fn card() -> ui::Element {
     column().padding(16).radius(16).bg(CARD)
 }
+#[track_caller]
 fn image(src: &str, size: u32) -> ui::Element {
     // API3 hosts consume image content; src is also set for hosts supporting props.
     layout_node(ui::ElementType::Image, Some(src))
@@ -295,6 +347,7 @@ fn disabled(el: ui::Element, yes: bool) -> ui::Element {
         el
     }
 }
+#[track_caller]
 fn row() -> ui::Element {
     layout_node(ui::ElementType::Div, None)
         .flex()
@@ -318,7 +371,7 @@ fn uploader_tab(s: &state::State, id: &str) -> &'static str {
     if id == "com.chem.magic"
         && s.modules
             .iter()
-            .any(|m| m.id == id && m.intent == 1 && m.error == 0 && matches!(m.state, 8 | 9 | 13))
+            .any(|m| m.id == id && m.intent == 1 && m.error == 0 && matches!(m.state, 9 | 13))
     {
         return "magic";
     }
@@ -362,7 +415,7 @@ fn icon_button(path: &str, label: &str, event: &str, accent: bool) -> ui::Elemen
         .justify_center()
         .prop("aria-label", label)
         .prop("title", label)
-        .on(ui::Event::Click, event)
+        .on(ui::Event::Click, &event_id(event))
         .child(icon)
 }
 const DELETE_ICON: &str =
@@ -486,6 +539,9 @@ fn song_activity(mut card: ui::Element, s: &state::State, id: u64) -> ui::Elemen
         }
         card = card.child(button("取消", "cancel", false));
     }
+    if !running && crate::prepared::waiting() {
+        card = card.child(button("取消", "cancel", false));
+    }
     card
 }
 
@@ -517,17 +573,18 @@ async fn import_cloud_song(song: &state::CloudSong, s: &state::State) -> Result<
     }
     let current = state::snapshot();
     let cancelled = current.song_job.as_ref().is_none_or(|j| j.cancel_requested);
-    if cancelled
-        || current.addr != s.addr
-        || current.connection_epoch != s.connection_epoch
-        || !current.music_connected()
-    {
-        return Err(if cancelled {
-            "已取消下载"
-        } else {
-            "手环连接已变化，请重新导入"
+    if cancelled || current.addr != s.addr || current.connection_epoch != s.connection_epoch {
+        if cancelled {
+            return Err("已取消下载".into());
         }
-        .into());
+        crate::prepared::retain(
+            prepared.into_path(),
+            std::mem::take(&mut meta.0),
+            true,
+            s.addr.clone(),
+            crate::prepared::Stage::Convert(s.bitrate, s.predecode),
+        );
+        return Ok(());
     }
     state::with(|s| {
         if let Some(job) = &mut s.song_job {
@@ -554,7 +611,9 @@ pub fn rerender() {
     }
 }
 pub fn render(root: &str) {
-    UI_NODES.with(|nodes| nodes.borrow_mut().clear());
+    if state::snapshot().root.as_deref() != Some(root) {
+        UI_NODES.with(|nodes| nodes.borrow_mut().clear());
+    }
     state::with(|s| s.root = Some(root.into()));
     rerender();
 }
@@ -570,6 +629,25 @@ fn local_transfer_visible(s: &state::State, tab: &str) -> bool {
 fn connection_panel_visible(s: &state::State) -> bool {
     !s.manager_connected()
 }
+fn status_visible(s: &state::State, tab: &str) -> bool {
+    !s.status.is_empty()
+        && s.status_owner.visible_in(tab)
+        && !(s.status_owner == state::NoticeOwner::Music
+            && (s.song_job.is_some() || local_transfer_visible(s, tab)))
+}
+fn pack_index(view: &crate::magic::View, id: &str) -> Result<u32, String> {
+    if view.busy {
+        return Err("请先完成当前操作".into());
+    }
+    view.rows
+        .iter()
+        .position(|p| p.id == id)
+        .map(|i| i as u32)
+        .ok_or_else(|| "资源包列表已变化，请刷新后重试".into())
+}
+#[cfg(test)]
+#[path = "ui_render_tests.rs"]
+mod render_tests;
 #[cfg(test)]
 mod connection_visibility_tests {
     use super::*;
@@ -661,7 +739,10 @@ mod connection_visibility_tests {
             "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845".into();
         s.cloud_modules.clear();
         s.cloud_notice = "获取云端清单失败，本地 .chem 导入仍可用：timeout".into();
-        assert!(!chem_import_blocked(&s), "offline import must stay clickable");
+        assert!(
+            !chem_import_blocked(&s),
+            "offline import must stay clickable"
+        );
         assert!(!connection_blocked(&s, "module-import"));
         s.download = Some(cloud_download::Progress {
             owner: cloud_download::Owner::Catalog,
@@ -716,7 +797,7 @@ mod connection_visibility_tests {
         let mut s = state::State::default();
         s.modules.push(modules::Module {
             id: "bluetooth_audio".into(),
-            state: 8,
+            state: 9,
             intent: 1,
             ..Default::default()
         });
@@ -750,7 +831,7 @@ mod connection_visibility_tests {
         s.native_delivery = true;
         s.modules.push(modules::Module {
             id: "bluetooth_audio".into(),
-            state: 8,
+            state: 9,
             intent: 1,
             ..Default::default()
         });
@@ -809,7 +890,7 @@ mod connection_visibility_tests {
         s.bulk_delivery = true;
         s.modules.push(modules::Module {
             id: "bluetooth_audio".into(),
-            state: 8,
+            state: 9,
             intent: 1,
             ..Default::default()
         });
@@ -843,7 +924,7 @@ mod connection_visibility_tests {
         s.direct = true;
         s.modules.push(modules::Module {
             id: "bluetooth_audio".into(),
-            state: 8,
+            state: 9,
             intent: 1,
             ..Default::default()
         });
@@ -875,12 +956,16 @@ mod connection_visibility_tests {
     }
 }
 fn build(s: &state::State) -> ui::Element {
-    UI_LAYOUT.with(|layout| *layout.borrow_mut() = LayoutIdentity::default());
-    let tab = if s.tab == "module-uploader" {
-        uploader_tab(s, &s.module_detail)
-    } else {
-        &s.tab
-    };
+    let (tab, page) = current_page(s);
+    UI_LAYOUT.with(|layout| {
+        let mut layout = layout.borrow_mut();
+        let generation = layout.generation.wrapping_add((layout.page != page) as u64);
+        *layout = LayoutIdentity {
+            page,
+            generation,
+            ..Default::default()
+        };
+    });
     scope("chrome:root");
     // No fixed content width or duplicate app hero: the host already owns its title.
     let mut root = stable_node(ui::ElementType::Div, None, "chem-root")
@@ -911,9 +996,8 @@ fn build(s: &state::State) -> ui::Element {
         connection::Phase::Failed(message) => message,
     };
     scope("chrome:connection");
-    let connection_bar = row().child(equal(text(connection_text, 14, MUTED)));
     if connection_panel_visible(s) {
-        root = root.child(connection_bar);
+        root = root.child(row().child(equal(text(connection_text, 14, MUTED))));
     }
     if s.needs_update() {
         scope("chrome:version");
@@ -926,7 +1010,7 @@ fn build(s: &state::State) -> ui::Element {
             MUTED,
         ));
     }
-    if !s.status.is_empty() {
+    if status_visible(s, tab) {
         scope("chrome:status");
         root = root.child(text(
             &s.status,
@@ -1024,7 +1108,8 @@ fn build(s: &state::State) -> ui::Element {
         "modules" => {
             root = root.child(
                 row()
-                    .child(equal(text("模块管理", 28, INK)))
+                    .prop("class", "flex-wrap")
+                    .child(equal(text("模块管理", 28, INK)).min_width(120))
                     .child(
                         button(
                             if s.discovering {
@@ -1084,7 +1169,8 @@ fn build(s: &state::State) -> ui::Element {
                 ));
                 if !s.safe_exit_pending {
                     root = root.child(
-                        row()
+                        column()
+                            .gap(8)
                             .child(disabled(
                                 button("退出并重试", "safe-exit:0", false),
                                 module_busy(s),
@@ -1130,7 +1216,7 @@ fn build(s: &state::State) -> ui::Element {
                 .transform("none")
                 .prop("aria-label", &format!("打开 {} 上传器", m.name()))
                 .prop("title", &format!("打开 {} 上传器", m.name()))
-                .on(ui::Event::Click, &format!("module:{}", m.id));
+                .on(ui::Event::Click, &event_id(&format!("module:{}", m.id)));
                 let line = stable_node(ui::ElementType::Div, None, &format!("line:{}", m.id))
                     .flex()
                     .flex_direction(ui::FlexDirection::Row)
@@ -1215,7 +1301,7 @@ fn build(s: &state::State) -> ui::Element {
                     m.id == "com.chem.magic"
                         && m.intent == 1
                         && m.error == 0
-                        && matches!(m.state, 8 | 9 | 13)
+                        && matches!(m.state, 9 | 13)
                 });
             root = root.child(
                 row()
@@ -1268,8 +1354,9 @@ fn build(s: &state::State) -> ui::Element {
                 import = import.child(text(&magic.message, 14, MUTED));
             }
             root = root.child(import);
-            for (i, (name, enabled)) in magic.rows.iter().enumerate() {
-                scope(&format!("page:magic:pack:{name}"));
+            for pack in &magic.rows {
+                let name = &pack.name;
+                scope(&format!("page:magic:pack:{}", pack.id));
                 root = root.child(
                     row()
                         .padding_left(4)
@@ -1277,17 +1364,17 @@ fn build(s: &state::State) -> ui::Element {
                         .min_height(56)
                         .child(equal(text(name, 16, INK)))
                         .child(toggle_switch(
-                            &format!("magic-pack-{i}"),
+                            "magic-pack-switch",
                             name,
-                            &format!("magic-toggle:{i}"),
-                            *enabled,
+                            &format!("magic-toggle:{}", pack.id),
+                            pack.enabled,
                             blocked,
                         ))
                         .child(disabled(
                             icon_button(
                                 DELETE_ICON,
                                 &format!("卸载 {name}"),
-                                &format!("magic-delete:{i}"),
+                                &format!("magic-delete:{}", pack.id),
                                 false,
                             ),
                             blocked,
@@ -1379,15 +1466,16 @@ fn build(s: &state::State) -> ui::Element {
             }
             for song in &s.results {
                 scope(&format!("page:cloud:song:{}", song.id));
-                let mut title = column()
-                    .flex_grow(1.0)
-                    .child(text(&song.name, 18, INK))
-                    .child(text(&song.artists.join(" / "), 13, MUTED));
+                let mut title = row();
                 if !song.cover_url.is_empty() {
-                    title = row()
-                        .child(image(&song.cover_url, 44).radius(12))
-                        .child(title);
+                    title = title.child(image(&song.cover_url, 44).radius(12));
                 }
+                title = title.child(
+                    column()
+                        .flex_grow(1.0)
+                        .child(text(&song.name, 18, INK))
+                        .child(text(&song.artists.join(" / "), 13, MUTED)),
+                );
                 root = root.child(song_activity(
                     card().child(title).child(disabled(
                         button("导入手环", &format!("cloud:{}", song.id), true),
@@ -1467,10 +1555,11 @@ fn build(s: &state::State) -> ui::Element {
                         MUTED,
                     ))
                     .child(text("歌曲名称", 14, MUTED))
-                    .child(
-                        input("输入歌曲名称", &s.local_name, "name")
-                            .prop("key", &format!("name:{}", s.local_path)),
-                    );
+                    .child(input(
+                        "输入歌曲名称",
+                        &s.local_name,
+                        &format!("name:{}", s.local_path),
+                    ));
             }
             pane = pane
                 .child(disabled(
@@ -1543,12 +1632,21 @@ fn build(s: &state::State) -> ui::Element {
         }
     }
     scope("chrome:footer");
-    root.child(text(
-        concat!("ChemClient ", env!("CARGO_PKG_VERSION")),
-        12,
-        MUTED,
-    ))
-    .child(column().height(24).flex_grow(1.0))
+    let tree = root
+        .child(text(
+            concat!("ChemClient ", env!("CARGO_PKG_VERSION")),
+            12,
+            MUTED,
+        ))
+        .child(column().height(24).flex_grow(1.0));
+    UI_LAYOUT.with(|layout| {
+        UI_NODES.with(|nodes| {
+            nodes
+                .borrow_mut()
+                .retain(|key, _| layout.borrow().used.contains(key));
+        })
+    });
+    tree
 }
 fn compression_options(s: &state::State) -> ui::Element {
     let mut choices = column().gap(8);
@@ -1608,7 +1706,18 @@ fn ui_value(payload: &str) -> String {
         .to_owned()
 }
 pub async fn event(id: &str, payload: &str) {
+    let Some(id) = visible_event(id, &state::snapshot()) else {
+        return;
+    };
     let value = ui_value(payload);
+    if let Some(path) = id.strip_prefix("name:") {
+        state::with(|s| {
+            if s.local_path == path && !s.active {
+                s.local_name = value;
+            }
+        });
+        return;
+    }
     match id {
         "query" => {
             state::with(|s| s.query = value);
@@ -1630,8 +1739,9 @@ pub async fn event(id: &str, payload: &str) {
     }
     // Navigation and editing remain responsive while a dialog/host call awaits.
     if independent_action(id) {
+        let owner = notice_owner(id, &state::snapshot());
         if let Err(e) = action(id, &value).await {
-            state::with(|s| s.status = e);
+            state::with(|s| s.notice(owner, e));
         }
         rerender();
         return;
@@ -1639,6 +1749,7 @@ pub async fn event(id: &str, payload: &str) {
     let Some(guard) = state::try_action() else {
         return;
     };
+    let owner = notice_owner(id, &state::snapshot());
     state::with(|s| s.pending_action = id.into());
     if matches!(id, "search" | "playlists" | "login" | "login-check") || id.starts_with("playlist:")
     {
@@ -1657,13 +1768,41 @@ pub async fn event(id: &str, payload: &str) {
                     .unwrap_or_else(|| module.into());
                 s.module_message(module, &name, &e);
             } else if !id.starts_with("cloud:") {
-                s.status = e;
+                s.notice(owner, e);
             }
         });
     }
     state::with(|s| s.pending_action.clear());
     drop(guard);
     rerender();
+}
+fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
+    use state::NoticeOwner::*;
+    if id.starts_with("magic-") || id.starts_with("magic:") {
+        return Magic;
+    }
+    if id.starts_with("module")
+        || id.starts_with("boot-")
+        || id.starts_with("safe-")
+        || id == "refresh"
+    {
+        return Modules;
+    }
+    match id {
+        "search" | "playlists" | "login" | "login-check" | "logout" => Cloud,
+        "library" => Library,
+        "pick" | "pick-cover" | "pick-lyrics" | "clear-attachments" => Local,
+        _ if id.starts_with("playlist:") => Cloud,
+        _ if id.starts_with("delete:") => Library,
+        _ if id.starts_with("cloud:") || id == "upload" || id == "cancel" => Music,
+        _ => match s.tab.as_str() {
+            "cloud" => Cloud,
+            "local" => Local,
+            "library" => Library,
+            "magic" => Magic,
+            _ => Modules,
+        },
+    }
 }
 async fn action(id: &str, _value: &str) -> Result<(), String> {
     if connection_blocked(&state::snapshot(), id) {
@@ -1676,16 +1815,18 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         crate::magic::cancel();
         return Ok(());
     }
-    if let Some(i) = id.strip_prefix("magic-toggle:") {
-        return crate::magic::toggle(i.parse().map_err(|_| "资源包编号无效")?).await;
+    if let Some(pack) = id.strip_prefix("magic-toggle:") {
+        let view = crate::magic::snapshot();
+        let index = pack_index(&view, pack)?;
+        return crate::magic::toggle(index).await;
     }
-    if let Some(i) = id.strip_prefix("magic-delete:") {
-        let index: usize = i.parse().map_err(|_| "资源包编号无效")?;
+    if let Some(pack) = id.strip_prefix("magic-delete:") {
         let magic = crate::magic::snapshot();
         if magic.busy {
             return Err("请先完成当前操作".into());
         }
-        let (name, _) = magic.rows.get(index).ok_or("请刷新资源包列表")?;
+        let index = pack_index(&magic, pack)?;
+        let name = &magic.rows[index as usize].name;
         let result = dialog::show_dialog(
             dialog::DialogType::Alert,
             dialog::DialogStyle::Website,
@@ -1709,7 +1850,8 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         )
         .await;
         if result.clicked_btn_id == "delete" {
-            return crate::magic::remove(index as u32).await;
+            let current = crate::magic::snapshot();
+            return crate::magic::remove(pack_index(&current, pack)?).await;
         }
         return Ok(());
     }
@@ -1880,6 +2022,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             s.delete_module.clear();
         });
         if module == "com.chem.magic" && uploader_tab(&state::snapshot(), module) == "magic" {
+            rerender();
             return crate::magic::refresh().await;
         }
         return Ok(());
@@ -1955,6 +2098,10 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         return Ok(());
     }
     if id == "cancel" {
+        if crate::prepared::cancel() {
+            state::with(|s| s.notice(state::NoticeOwner::Music, "已取消待导入音频"));
+            return Ok(());
+        }
         if state::with(|s| {
             if let Some(job) = s.song_job.as_mut().filter(|j| j.network) {
                 job.cancel_requested = true;
@@ -2058,7 +2205,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                s.status = "音频已选择，确认曲名后导入".into();
+                s.notice(state::NoticeOwner::Local, "音频已选择，确认曲名后导入");
             });
             Ok(())
         }
@@ -2104,13 +2251,13 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             if s.query.trim().is_empty() {
                 return Err("输入歌曲或歌手后搜索".into());
             }
-            state::with(|s| s.status = "正在搜索音乐".into());
+            state::with(|s| s.notice(state::NoticeOwner::Cloud, "正在搜索音乐"));
             rerender();
             let rows = netease::search(&s.query, &s.cookie).await?;
             state::with(|s| {
                 s.results = rows;
                 s.playlists.clear();
-                s.status = "选一首喜欢的音乐".into();
+                s.notice(state::NoticeOwner::Cloud, "选一首喜欢的音乐");
             });
             Ok(())
         }
@@ -2120,7 +2267,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             state::with(|s| {
                 s.playlists = rows;
                 s.results.clear();
-                s.status = "选择歌单".into();
+                s.notice(state::NoticeOwner::Cloud, "选择歌单");
             });
             Ok(())
         }
@@ -2129,7 +2276,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
             state::with(|s| {
                 s.qr_key = key;
                 s.qr_url = url;
-                s.status = "使用网易云音乐扫描二维码".into();
+                s.notice(state::NoticeOwner::Cloud, "使用网易云音乐扫描二维码");
             });
             Ok(())
         }
@@ -2143,10 +2290,12 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                         s.cookie = cookie;
                         s.qr_key.clear();
                         s.qr_url.clear();
-                        s.status = "已登录网易云".into();
+                        s.notice(state::NoticeOwner::Cloud, "已登录网易云");
                     });
                 }
-                None => state::with(|s| s.status = "等待扫码并在网易云确认登录".into()),
+                None => state::with(|s| {
+                    s.notice(state::NoticeOwner::Cloud, "等待扫码并在网易云确认登录")
+                }),
             }
             Ok(())
         }
@@ -2157,7 +2306,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                 s.qr_key.clear();
                 s.qr_url.clear();
                 s.playlists.clear();
-                s.status = "已退出登录".into();
+                s.notice(state::NoticeOwner::Cloud, "已退出登录");
             });
             Ok(())
         }
@@ -2203,7 +2352,7 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
                 state::with(|s| {
                     s.results = tracks;
                     s.playlists.clear();
-                    s.status = name;
+                    s.notice(state::NoticeOwner::Cloud, name);
                 });
                 return Ok(());
             }
