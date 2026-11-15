@@ -208,6 +208,18 @@ fn connection_blocked(s: &state::State, event: &str) -> bool {
     }
     false
 }
+/// Local .chem import only needs a connected manager reporting native upload
+/// capability. It must never depend on the cloud catalog lookup.
+fn chem_import_blocked(s: &state::State) -> bool {
+    button_blocked(s, "module-import")
+        || !s.manager_ready
+        || !s.native_delivery
+        || s.manager_busy
+        || s.installing
+        || s.active
+        || s.downloading_artifact()
+        || s.connection.busy()
+}
 fn toggle_switch(key: &str, label: &str, event: &str, enabled: bool, busy: bool) -> ui::Element {
     let track = fixed_box(stable_node(ui::ElementType::Button, None, key), 52, 32)
         .padding(0)
@@ -641,6 +653,28 @@ mod connection_visibility_tests {
         }
     }
     #[test]
+    fn offline_catalog_does_not_disable_local_chem_import() {
+        let mut s = connected();
+        s.native_delivery = true;
+        s.target = "xiaomi-band-10-nfc-3.1.28".into();
+        s.firmware_sha256 =
+            "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845".into();
+        s.cloud_modules.clear();
+        s.cloud_notice = "获取云端清单失败，本地 .chem 导入仍可用：timeout".into();
+        assert!(!chem_import_blocked(&s), "offline import must stay clickable");
+        assert!(!connection_blocked(&s, "module-import"));
+        s.download = Some(cloud_download::Progress {
+            owner: cloud_download::Owner::Catalog,
+            received: 0,
+            total: None,
+            elapsed: 0,
+            connecting: true,
+        });
+        assert!(!chem_import_blocked(&s));
+        s.native_delivery = false;
+        assert!(chem_import_blocked(&s));
+    }
+    #[test]
     fn only_pending_operations_disable_buttons_and_navigation_stays_usable() {
         let mut s = state::State::default();
         assert!(!button_blocked(&s, "search"));
@@ -1005,13 +1039,7 @@ fn build(s: &state::State) -> ui::Element {
                     )
                     .child(disabled(
                         button("导入 .chem", "module-import", true).width(128),
-                        !s.manager_ready
-                            || !s.native_delivery
-                            || s.manager_busy
-                            || s.installing
-                            || s.active
-                            || s.downloading_artifact()
-                            || s.connection.busy(),
+                        chem_import_blocked(s),
                     )),
             );
             if !s.cloud_notice.is_empty() {

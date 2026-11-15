@@ -12,19 +12,33 @@ struct Bootstrap {
     waiting_since: Option<Instant>,
     device_info: Option<Vec<u8>>,
     catalog: Option<cloud::Catalog>,
+    /// Catalog lookup finished unsuccessfully (offline / timeout / bad payload).
+    /// Identity then comes from the built-in exact-target table, so a locally
+    /// imported .chem still works without ChemCloud.
+    catalog_failed: bool,
     /// A precise "unsupported device" reason, kept so a later service-probe
     /// timeout cannot replace it with a misleading "no Chem reply" message.
     identification_error: Option<String>,
 }
 impl Bootstrap {
     fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog)> {
-        if self.device_info.is_none() || self.catalog.is_none() {
+        if self.device_info.is_none() {
             return None;
         }
-        Some((
-            self.device_info.take().unwrap(),
-            self.catalog.take().unwrap(),
-        ))
+        let catalog = if let Some(c) = self.catalog.take() {
+            c
+        } else if self.catalog_failed {
+            /* An empty catalog makes cloud::identify_target() fall back to the
+             * built-in/local exact-target identities (target + firmware digest
+             * needed to verify a local .chem receipt). */
+            cloud::Catalog {
+                schema: 1,
+                targets: Vec::new(),
+            }
+        } else {
+            return None; /* catalog request still in flight */
+        };
+        Some((self.device_info.take().unwrap(), catalog))
     }
 }
 static BOOT: OnceLock<Mutex<Bootstrap>> = OnceLock::new();
@@ -39,6 +53,7 @@ pub fn reset() {
         b.waiting_since = None;
         b.device_info = None;
         b.catalog = None;
+        b.catalog_failed = false;
         b.identification_error = None;
     });
 }
@@ -112,7 +127,12 @@ pub async fn start(addr: &str) -> Result<(), String> {
     });
     ui::rerender();
     if let Err(e) = cloud_download::catalog(addr) {
-        state::with(|s| s.cloud_notice = e);
+        // The request could not even be started, so no catalog_ready callback
+        // will arrive. Mark it finished and keep local .chem import available.
+        state::with(|s| {
+            s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}")
+        });
+        with(|b| b.catalog_failed = true);
     }
     // Local service discovery must not wait for a cloud mirror or DeviceInfo.
     if let Err(e) = modules::connect_device(addr).await {
@@ -148,14 +168,18 @@ pub async fn catalog_ready(
     if s.addr != addr || !s.device_connected() {
         return Ok(());
     }
-    let catalog = match result {
-        Ok(catalog) => catalog,
+    match result {
+        Ok(catalog) => with(|b| b.catalog = Some(catalog)),
         Err(e) => {
-            state::with(|s| s.cloud_notice = format!("获取云端清单失败，可刷新重试：{e}"));
-            return Ok(());
+            state::with(|s| {
+                s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}")
+            });
+            /* Do not return: prepare_ready() also fills target and the exact
+             * firmware digest used to verify a local .chem receipt. An empty
+             * catalog resolves that from the built-in identity table. */
+            with(|b| b.catalog_failed = true);
         }
-    };
-    with(|b| b.catalog = Some(catalog));
+    }
     prepare_ready(addr).await?;
     ui::rerender();
     Ok(())
@@ -187,10 +211,12 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         s.firmware_sha256 = target.firmware_sha256.clone();
         s.expected_revision = target.loader.version;
         s.cloud_modules = target.modules.clone();
-        s.native_delivery = !s.resident_target.is_empty() && s.resident_capabilities & 1 != 0;
+        /* The device's capability word, not the cloud lookup, decides whether
+         * native .chem upload is possible. */
+        s.native_delivery = s.resident_capabilities & 1 != 0;
         if local_only {
             s.cloud_notice = format!(
-                "已识别 {}：ChemCloud 尚未登记该设备，云端模块下载不可用；模块导入还需设备端启用原生传输。",
+                "已识别 {}：云端清单不可用，已改用本地精确身份；可直接导入 .chem（需设备端启用原生传输）。",
                 target.target
             );
         }
@@ -231,6 +257,23 @@ mod tests {
             assert!(identify(&reply, &catalog).is_ok());
             assert!(b.take_ready().is_none());
         }
+    }
+    #[test]
+    fn failed_catalog_still_resolves_builtin_identity_for_local_chem() {
+        let mut b = Bootstrap::default();
+        b.device_info = Some(packet("3.1.28", "M2456B1"));
+        assert!(b.take_ready().is_none()); // catalog request still in flight
+        b.catalog_failed = true;
+        let (reply, catalog) = b.take_ready().unwrap();
+        assert!(catalog.targets.is_empty());
+        let target = identify(&reply, &catalog).expect("built-in o66nfc identity");
+        assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
+        assert_eq!(
+            target.firmware_sha256,
+            "fb726472416e99ba11d1c20ce8f0d4f0831a6e9a673d63bb5918e2c3921d8845"
+        );
+        assert!(target.local_only);
+        assert!(b.take_ready().is_none());
     }
     fn packet(firmware: &str, model: &str) -> Vec<u8> {
         fn field(id: u8, value: &[u8]) -> Vec<u8> {

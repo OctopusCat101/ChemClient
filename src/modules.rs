@@ -512,8 +512,10 @@ pub async fn received(payload: &str) {
             state::with(|s| {
                 s.resident_target = target;
                 s.resident_capabilities = word(data, 80).unwrap_or(0);
-                s.native_delivery =
-                    !s.firmware_sha256.is_empty() && s.resident_capabilities & 1 != 0;
+                /* Native upload capability is reported by the device itself.
+                 * Requiring the cloud-derived firmware hash here disabled
+                 * local .chem import whenever ChemCloud was unreachable. */
+                s.native_delivery = s.resident_capabilities & 1 != 0;
                 s.bulk_delivery = word(data, 80).unwrap_or(0) & 2 != 0;
             });
         }
@@ -752,7 +754,8 @@ mod tests {
         assert!(s.manager_ready && !s.manager_busy && s.safe_mode && s.safe_exit_pending);
         assert_eq!(s.connection, connection::Phase::Ready);
         assert_eq!(s.resident_revision, 0x26111303);
-        assert!(s.modules.is_empty() && !s.native_delivery && s.firmware_sha256.is_empty());
+        assert!(s.modules.is_empty() && s.firmware_sha256.is_empty());
+        assert_eq!(s.native_delivery, s.resident_capabilities & 1 != 0);
         assert!(link(|l| l.pending.is_none()));
         state::with(|s| {
             s.expected_revision = 0x26111304;
