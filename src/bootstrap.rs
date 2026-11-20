@@ -323,9 +323,7 @@ mod tests {
 
     #[test]
     fn band10_nfc_is_identified_without_a_cloud_catalog_entry() {
-        // ChemCloud currently publishes only xiaomi-band-9-3.1.35. A Band 10
-        // NFC must still be identified, otherwise bootstrap never arms its
-        // retry state and a service probe timeout is reported as "no reply".
+        // Identification also works before the cloud target is available.
         let c = cloud::fixture().unwrap();
         for model in [
             "o66nfc",
@@ -333,6 +331,8 @@ mod tests {
             "miwear.watch.o66nfc",
             "M2456B1",
             "m2456b1",
+            "M2457B1",
+            "m2457b1",
         ] {
             let target = identify(&packet("3.1.28", model), &c).unwrap();
             assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
@@ -351,16 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn reported_hardware_model_m2456b1_3_1_28_is_supported() {
-        // Exact identity reported by a connected Xiaomi Band 10 NFC after the
-        // manager bridge was enabled: "暂不支持此手环固件：M2456B1 3.1.28".
-        // The device reports a hardware model, not the o66nfc codename.
+    fn shared_firmware_hardware_models_are_supported() {
         let c = cloud::fixture().unwrap();
-        let target = identify(&packet("3.1.28", "M2456B1"), &c).unwrap();
-        assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
-        assert!(target.local_only);
-        // The hardware ID must not unlock a different firmware version.
-        assert!(identify(&packet("3.1.35", "M2456B1"), &c).is_err());
+        for model in ["M2456B1", "M2457B1"] {
+            let target = identify(&packet("3.1.28", model), &c).unwrap();
+            assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
+            assert!(target.local_only);
+            assert!(identify(&packet("3.1.35", model), &c).is_err());
+        }
         assert!(identify(&packet("3.1.28", "M2456B2"), &c).is_err());
     }
 

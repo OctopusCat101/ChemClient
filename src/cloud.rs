@@ -68,11 +68,9 @@ pub const KNOWN_TARGETS: &[KnownTarget] = &[KnownTarget {
         "miwear.watch.o66nfc",
         "miwear.watch.O66NFC",
         "xiaomi.watch.o66nfc",
-        // System.DeviceInfo.model reports the hardware ID on a real device,
-        // not the firmware codename. Observed on a connected Band 10 NFC:
-        // "M2456B1 3.1.28". Band 9 does the same with "M2346B1".
-        // Only device-reported IDs go here; no guessed siblings.
+        // Both hardware variants use the same firmware.
         "M2456B1",
+        "M2457B1",
     ],
 }];
 
@@ -289,6 +287,7 @@ mod tests {
         assert_eq!(t.loader.version, 0);
         assert!(t.device_ids.iter().any(|id| id == "miwear.watch.o66nfc"));
         assert!(t.device_ids.iter().any(|id| id == "M2456B1"));
+        assert!(t.device_ids.iter().any(|id| id == "M2457B1"));
         assert!(hash(&t.firmware_sha256));
     }
     #[test]
