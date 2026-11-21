@@ -1160,19 +1160,17 @@ fn build(s: &state::State) -> ui::Element {
             );
             if crate::installer::offered(s) || s.installer.busy() || s.installer.waiting_for_run() {
                 scope("page:modules:installer");
+                let title = if s.needs_update() {
+                    "Chem 有更新"
+                } else {
+                    "Chem 安装器"
+                };
                 let mut panel = card().child(
                     row()
-                        .child(equal(text(
-                            if s.needs_update() {
-                                "Chem 有更新"
-                            } else {
-                                "Chem 安装器"
-                            },
-                            16,
-                            INK,
-                        )))
+                        .prop("class", "flex-wrap")
+                        .child(equal(text(title, 16, INK)).min_width(112))
                         .child(disabled(
-                            button("安装", "chem-install", true),
+                            button("安装", "chem-install", true).width(80),
                             button_blocked(s, "chem-install"),
                         )),
                 );

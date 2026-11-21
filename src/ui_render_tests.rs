@@ -327,6 +327,19 @@ fn export_layout_fixtures_when_requested() {
         fixtures.push(json!({"name":tab,"tree":tree(&s)}));
     }
     s.tab = "modules".into();
+    s.resident_revision = 1;
+    s.expected_revision = 2;
+    s.installer.release = Some(crate::installer::Release {
+        face_id: "913211314".into(),
+        artifact: Default::default(),
+    });
+    fixtures.push(json!({"name":"chem-update","tree":tree(&s)}));
+    s.installer.message = "正在下载 Chem 安装器…".into();
+    s.installer.progress = Some(48);
+    fixtures.push(json!({"name":"chem-update-progress","tree":tree(&s)}));
+    s.installer = Default::default();
+    s.resident_revision = 0;
+    s.expected_revision = 0;
     s.safe_mode = true;
     s.installing = true;
     s.install_id = "bluetooth_audio".into();
