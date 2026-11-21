@@ -29,10 +29,6 @@ impl Module {
             "NoirMusic"
         } else if self.id == "com.chem.magic" {
             "Magic"
-        } else if self.id == crate::hbl2d::ID {
-            "HBL2D"
-        } else if self.id == crate::hbl2d::LEGACY_ID {
-            "HBL2D（旧版）"
         } else {
             &self.id
         }
@@ -298,7 +294,6 @@ fn fail(error: String) {
         crate::delivery::fail(error.clone());
     }
     crate::magic::transport_failed(&error);
-    crate::hbl2d::transport_failed(&error);
     if !crate::bootstrap::probe_failed(&error) {
         connection::failed(error);
     }
@@ -489,11 +484,7 @@ pub async fn received(payload: &str) {
         return;
     }
     if op == 29 {
-        if crate::hbl2d::busy() {
-            crate::hbl2d::received(result, data).await;
-        } else {
-            crate::magic::management_response(result, data).await;
-        }
+        crate::magic::management_response(result, data).await;
         return;
     }
     if crate::delivery::busy() {

@@ -387,7 +387,6 @@ fn disconnect(devices: Vec<(String, String)>) {
     modules::reset_connection();
     crate::bootstrap::reset();
     crate::magic::disconnected();
-    crate::hbl2d::transport_failed("手环已断开，请重新连接后导入");
     if crate::delivery::busy() {
         crate::delivery::fail("手环已断开，安装未完成，请重新连接后重试".into());
     }

@@ -1,8 +1,8 @@
 {
   "name": "ChemClient",
   "icon": "icon.png",
-  "version": "1.7.43",
-  "description": "Chem 客户端，支持模块管理与 NoirMusic、Magic、HBL2D 内容导入",
+  "version": "1.7.44",
+  "description": "Chem 客户端，支持模块管理与 NoirMusic、Magic 内容导入",
   "author": "Chem contributors",
   "website": "https://github.com/OctopusCat101/ChemClient",
   "entry": "chemclient.wasm",

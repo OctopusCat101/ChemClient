@@ -125,7 +125,6 @@ pub async fn start() -> Result<(), String> {
         || s.installing
         || crate::transfer::busy()
         || crate::magic::busy()
-        || crate::hbl2d::busy()
     {
         return Err("请等待当前操作完成并刷新手环".into());
     }

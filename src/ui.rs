@@ -62,7 +62,7 @@ fn current_page(s: &state::State) -> (&str, String) {
         &s.tab
     };
     let tab = match tab {
-        "modules" | "local" | "cloud" | "library" | "magic" | "hbl2d" | "module-uploader" => tab,
+        "modules" | "local" | "cloud" | "library" | "magic" | "module-uploader" => tab,
         _ => "modules",
     };
     let page = format!(
@@ -215,7 +215,6 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
 }
 fn independent_action(event: &str) -> bool {
     event == "cancel"
-        || event == "hbl2d-cancel"
         || event == "predecode"
         || event == "upload-options"
         || event.starts_with("tab:")
@@ -234,23 +233,18 @@ fn connection_blocked(s: &state::State, event: &str) -> bool {
             || s.installing
             || s.downloading_artifact()
             || transfer::busy()
-            || crate::magic::busy()
-            || crate::hbl2d::busy();
+            || crate::magic::busy();
     }
     if s.installer.busy()
         && (event.starts_with("module-")
             || event.starts_with("boot-")
             || event.starts_with("safe-")
             || event.starts_with("magic-")
-            || event == "hbl2d-import"
             || matches!(event, "upload" | "library")
             || event.starts_with("cloud:")
             || event.starts_with("delete:"))
     {
         return true;
-    }
-    if event == "hbl2d-import" {
-        return !crate::hbl2d::can_import(s);
     }
     if event == "refresh" {
         return !s.installer.can_refresh()
@@ -393,9 +387,6 @@ fn module_busy(s: &state::State) -> bool {
         || !s.manager_connected()
 }
 fn uploader_tab(s: &state::State, id: &str) -> &'static str {
-    if id == crate::hbl2d::ID {
-        return "hbl2d";
-    }
     if !s.manager_connected() {
         return "module-uploader";
     }
@@ -527,7 +518,7 @@ fn song_activity(mut card: ui::Element, s: &state::State, id: u64) -> ui::Elemen
     let Some(job) = s.song_job.as_ref().filter(|j| j.id == id) else {
         return card;
     };
-    let uploading = s.active && !crate::magic::busy() && !crate::hbl2d::busy();
+    let uploading = s.active && !crate::magic::busy();
     let running = job.network || uploading;
     let (bytes, total, speed) = if job.network {
         (job.received, job.total, job.speed)
@@ -1049,7 +1040,7 @@ fn build(s: &state::State) -> ui::Element {
     scope(&format!("page:{tab}:navigation"));
     if matches!(
         tab,
-        "local" | "cloud" | "library" | "hbl2d" | "module-uploader"
+        "local" | "cloud" | "library" | "module-uploader"
     ) {
         let name = s
             .modules
@@ -1080,7 +1071,7 @@ fn build(s: &state::State) -> ui::Element {
             ));
         }
     }
-    if local_transfer_visible(s, tab) && !crate::magic::busy() && !crate::hbl2d::busy() {
+    if local_transfer_visible(s, tab) && !crate::magic::busy() {
         scope(&format!("page:{tab}:music-transfer"));
         let progress = if s.total == 0 {
             0
@@ -1340,32 +1331,6 @@ fn build(s: &state::State) -> ui::Element {
                 ));
             }
         }
-        "hbl2d" => {
-            let model = crate::hbl2d::snapshot();
-            let mut import = column().gap(8).child(disabled(
-                button("导入模型（.hbm）", "hbl2d-import", true),
-                !crate::hbl2d::can_import(s),
-            ));
-            if model.busy {
-                import = import
-                    .child(text(&model.message, 14, MUTED))
-                    .child(progress_bar((model.sent * 100 / model.total.max(1)) as u64))
-                    .child(button("取消", "hbl2d-cancel", false));
-            } else if !model.message.is_empty() {
-                import = import.child(text(&model.message, 14, MUTED));
-            } else if !s.manager_connected() {
-                import = import.child(text("请先连接手环", 14, MUTED));
-            } else if !crate::hbl2d::module_ready(s) {
-                import = import.child(text("请启用 HBL2D 并按提示重启手环", 14, MUTED));
-            } else if s.resident_capabilities & 4 == 0 {
-                import = import.child(text(
-                    "当前 Chem 安装器缺少模型导入所需的通信接口",
-                    14,
-                    MUTED,
-                ));
-            }
-            root = root.child(import);
-        }
         "magic" => {
             let magic = crate::magic::snapshot();
             let blocked = magic.busy
@@ -1460,9 +1425,6 @@ fn build(s: &state::State) -> ui::Element {
         }
         "module-uploader" => {
             let message = match s.modules.iter().find(|m| m.id == s.module_detail) {
-                Some(m) if m.id == crate::hbl2d::LEGACY_ID => {
-                    "请返回模块列表卸载旧版，再导入 HBL2D 0.1.4 或更新版本。"
-                }
                 Some(m) if !m.music() => "此模块暂未提供内容上传器，可在模块列表中管理。",
                 Some(m) if !m.importable() => {
                     "请打开模块右侧的开关，重启手环并运行 Chem 后即可上传。"
@@ -1854,9 +1816,6 @@ pub async fn event(id: &str, payload: &str) {
 }
 fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
     use state::NoticeOwner::*;
-    if id.starts_with("hbl2d-") {
-        return Hbl2d;
-    }
     if id.starts_with("magic-") || id.starts_with("magic:") {
         return Magic;
     }
@@ -1879,7 +1838,6 @@ fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
             "local" => Local,
             "library" => Library,
             "magic" => Magic,
-            "hbl2d" => Hbl2d,
             _ => Modules,
         },
     }
@@ -1890,36 +1848,6 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
     }
     if id == "chem-install" {
         return crate::installer::start().await;
-    }
-    if id == "hbl2d-cancel" {
-        crate::hbl2d::cancel();
-        return Ok(());
-    }
-    if id == "hbl2d-import" {
-        let picked = dialog::pick_file(
-            dialog::PickConfig {
-                read: false,
-                copy_to: Some("data/imports".into()),
-            },
-            dialog::FilterConfig {
-                multiple: false,
-                extensions: vec!["hbm".into()],
-                default_directory: String::new(),
-                default_file_name: String::new(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        if picked.name.is_empty() {
-            return Ok(());
-        }
-        if Path::new(&picked.name).file_name().and_then(|n| n.to_str()) != Some(&picked.name) {
-            return Err("文件名称无效".into());
-        }
-        let path = format!("data/imports/{}", picked.name);
-        let result = crate::hbl2d::import(&path).await;
-        let _ = fs::remove_file(path);
-        return result;
     }
     if id == "magic-refresh" {
         return crate::magic::refresh().await;

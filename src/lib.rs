@@ -9,7 +9,6 @@ mod cloud_download;
 mod connection;
 mod deadline;
 mod delivery;
-mod hbl2d;
 mod installer;
 mod magic;
 mod modules;
