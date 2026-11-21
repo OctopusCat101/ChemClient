@@ -7,6 +7,8 @@ world chem-client {
   import astrobox:psys-host-v4/device;
   import astrobox:psys-host-v4/register;
   import astrobox:psys-host-v4/timer;
+  import astrobox:psys-host-v4/queue;
+  import astrobox:psys-host-v4/watchface;
   export astrobox:psys-plugin-v4/lifecycle;
   export astrobox:psys-plugin-v4/event;
 }

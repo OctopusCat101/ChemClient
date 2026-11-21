@@ -72,6 +72,7 @@ pub enum NoticeOwner {
     Cloud,
     Library,
     Magic,
+    Hbl2d,
 }
 impl NoticeOwner {
     pub fn visible_in(self, tab: &str) -> bool {
@@ -82,6 +83,7 @@ impl NoticeOwner {
             Self::Cloud => tab == "cloud",
             Self::Library => tab == "library",
             Self::Magic => tab == "magic",
+            Self::Hbl2d => tab == "hbl2d",
         }
     }
 }
@@ -118,6 +120,7 @@ pub struct State {
     pub resident_capabilities: u32,
     pub cloud_modules: Vec<crate::cloud::Module>,
     pub cloud_notice: String,
+    pub installer: crate::installer::View,
     pub download: Option<crate::cloud_download::Progress>,
     pub installing: bool,
     pub install_sent: u64,

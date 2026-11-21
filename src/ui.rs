@@ -62,7 +62,7 @@ fn current_page(s: &state::State) -> (&str, String) {
         &s.tab
     };
     let tab = match tab {
-        "modules" | "local" | "cloud" | "library" | "magic" | "module-uploader" => tab,
+        "modules" | "local" | "cloud" | "library" | "magic" | "hbl2d" | "module-uploader" => tab,
         _ => "modules",
     };
     let page = format!(
@@ -215,6 +215,7 @@ fn button(label: &str, event: &str, primary: bool) -> ui::Element {
 }
 fn independent_action(event: &str) -> bool {
     event == "cancel"
+        || event == "hbl2d-cancel"
         || event == "predecode"
         || event == "upload-options"
         || event.starts_with("tab:")
@@ -225,8 +226,35 @@ fn button_blocked(s: &state::State, event: &str) -> bool {
     connection_blocked(s, event) || (!s.pending_action.is_empty() && !independent_action(event))
 }
 fn connection_blocked(s: &state::State, event: &str) -> bool {
+    if event == "chem-install" {
+        return !crate::installer::offered(s)
+            || s.discovering
+            || s.installer.busy()
+            || s.active
+            || s.installing
+            || s.downloading_artifact()
+            || transfer::busy()
+            || crate::magic::busy()
+            || crate::hbl2d::busy();
+    }
+    if s.installer.busy()
+        && (event.starts_with("module-")
+            || event.starts_with("boot-")
+            || event.starts_with("safe-")
+            || event.starts_with("magic-")
+            || event == "hbl2d-import"
+            || matches!(event, "upload" | "library")
+            || event.starts_with("cloud:")
+            || event.starts_with("delete:"))
+    {
+        return true;
+    }
+    if event == "hbl2d-import" {
+        return !crate::hbl2d::can_import(s);
+    }
     if event == "refresh" {
-        return s.discovering
+        return !s.installer.can_refresh()
+            || s.discovering
             || s.active
             || s.installing
             || s.manager_busy
@@ -236,7 +264,7 @@ fn connection_blocked(s: &state::State, event: &str) -> bool {
     if event == "module-import" || event.starts_with("module-install:") {
         return !s.manager_connected() || !s.native_delivery;
     }
-    if matches!(event, "boot-toggle" | "magic-refresh" | "magic-import")
+    if matches!(event, "magic-refresh" | "magic-import")
         || [
             "module:",
             "module-toggle:",
@@ -365,6 +393,9 @@ fn module_busy(s: &state::State) -> bool {
         || !s.manager_connected()
 }
 fn uploader_tab(s: &state::State, id: &str) -> &'static str {
+    if id == crate::hbl2d::ID {
+        return "hbl2d";
+    }
     if !s.manager_connected() {
         return "module-uploader";
     }
@@ -496,7 +527,7 @@ fn song_activity(mut card: ui::Element, s: &state::State, id: u64) -> ui::Elemen
     let Some(job) = s.song_job.as_ref().filter(|j| j.id == id) else {
         return card;
     };
-    let uploading = s.active && !crate::magic::busy();
+    let uploading = s.active && !crate::magic::busy() && !crate::hbl2d::busy();
     let running = job.network || uploading;
     let (bytes, total, speed) = if job.network {
         (job.received, job.total, job.speed)
@@ -772,7 +803,7 @@ mod connection_visibility_tests {
     #[test]
     fn pending_module_action_does_not_block_itself() {
         let mut s = connected();
-        s.pending_action = "boot-toggle".into();
+        s.pending_action = "safe-exit:0".into();
         assert!(!module_busy(&s));
         assert!(button_blocked(&s, "module-delete:music"));
         s.manager_busy = true;
@@ -842,7 +873,6 @@ mod connection_visibility_tests {
             "module-toggle:music",
             "module-delete:music",
             "module-rollback:music",
-            "boot-toggle",
             "safe-exit:0",
             "magic-refresh",
             "magic-import",
@@ -874,7 +904,7 @@ mod connection_visibility_tests {
         assert!(module_busy(&s) && connection_panel_visible(&s));
         assert_eq!(uploader_tab(&s, "bluetooth_audio"), "module-uploader");
         s.connected_devices = vec!["other-band".into()];
-        assert!(connection_blocked(&s, "boot-toggle"));
+        assert!(connection_blocked(&s, "safe-exit:0"));
         s.connected_devices = vec!["band".into()];
         s.connection = connection::Phase::Failed("service lost".into());
         assert!(connection_blocked(&s, "module-toggle:music"));
@@ -901,7 +931,6 @@ mod connection_visibility_tests {
             "module-install:music",
             "module-toggle:music",
             "module-delete:music",
-            "boot-toggle",
             "magic-refresh",
             "magic-import",
             "magic-toggle:0",
@@ -934,7 +963,6 @@ mod connection_visibility_tests {
             "module-delete:bluetooth_audio",
             "module-install:bluetooth_audio",
             "module-import",
-            "boot-toggle",
             "magic-toggle:0",
             "upload",
             "delete:1",
@@ -999,7 +1027,7 @@ fn build(s: &state::State) -> ui::Element {
     if connection_panel_visible(s) {
         root = root.child(row().child(equal(text(connection_text, 14, MUTED))));
     }
-    if s.needs_update() {
+    if s.needs_update() && !crate::installer::offered(s) {
         scope("chrome:version");
         root = root.child(text(
             &format!(
@@ -1019,7 +1047,10 @@ fn build(s: &state::State) -> ui::Element {
         ));
     }
     scope(&format!("page:{tab}:navigation"));
-    if matches!(tab, "local" | "cloud" | "library" | "module-uploader") {
+    if matches!(
+        tab,
+        "local" | "cloud" | "library" | "hbl2d" | "module-uploader"
+    ) {
         let name = s
             .modules
             .iter()
@@ -1049,7 +1080,7 @@ fn build(s: &state::State) -> ui::Element {
             ));
         }
     }
-    if local_transfer_visible(s, tab) && !crate::magic::busy() {
+    if local_transfer_visible(s, tab) && !crate::magic::busy() && !crate::hbl2d::busy() {
         scope(&format!("page:{tab}:music-transfer"));
         let progress = if s.total == 0 {
             0
@@ -1127,34 +1158,52 @@ fn build(s: &state::State) -> ui::Element {
                         chem_import_blocked(s),
                     )),
             );
-            if !s.cloud_notice.is_empty() {
-                root = root.child(text(&s.cloud_notice, 14, MUTED));
-            }
-            if s.manager_ready && s.boot_status & 1 != 0 {
-                scope("page:modules:boot");
-                let enabled = s.boot_status & 2 != 0;
-                root = root.child(
-                    stable_node(ui::ElementType::Div, None, "boot-panel")
-                        .flex()
-                        .flex_direction(ui::FlexDirection::Row)
-                        .align_center()
-                        .gap(12)
-                        .padding_left(16)
-                        .padding_right(16)
-                        .padding_top(8)
-                        .padding_bottom(8)
-                        .min_height(48)
-                        .radius(16)
-                        .bg(CARD)
-                        .child(equal(text("自动启动", 16, INK)))
-                        .child(toggle_switch(
-                            "boot-switch",
-                            "自动启动",
-                            "boot-toggle",
-                            enabled,
-                            module_busy(s) || state::action_busy(),
+            if crate::installer::offered(s) || s.installer.busy() || s.installer.waiting_for_run() {
+                scope("page:modules:installer");
+                let mut panel = card().child(
+                    row()
+                        .child(equal(text(
+                            if s.needs_update() {
+                                "Chem 有更新"
+                            } else {
+                                "Chem 安装器"
+                            },
+                            16,
+                            INK,
+                        )))
+                        .child(disabled(
+                            button("安装", "chem-install", true),
+                            button_blocked(s, "chem-install"),
                         )),
                 );
+                if s.needs_update() && s.boot_status & 2 != 0 {
+                    panel = panel.child(text(
+                        "旧版已启用自启动。请先在手环的 Chem 管理器关闭，再重启并运行新安装器。",
+                        14,
+                        MUTED,
+                    ));
+                }
+                if !s.installer.message.is_empty() {
+                    panel = panel.child(text(&s.installer.message, 14, MUTED));
+                }
+                let progress = s
+                    .download
+                    .as_ref()
+                    .filter(|p| matches!(p.owner, cloud_download::Owner::Installer))
+                    .and_then(|p| p.percent())
+                    .or(s.installer.progress);
+                if let Some(percent) = progress {
+                    panel = panel.child(progress_bar(percent)).child(text(
+                        &format!("{percent}%"),
+                        13,
+                        MUTED,
+                    ));
+                }
+                root = root.child(panel);
+            }
+            if !s.cloud_notice.is_empty() {
+                scope("page:modules:cloud-note");
+                root = root.child(text(&s.cloud_notice, 14, MUTED));
             }
             if s.manager_ready && s.safe_mode {
                 scope("page:modules:safe-mode");
@@ -1293,6 +1342,32 @@ fn build(s: &state::State) -> ui::Element {
                 ));
             }
         }
+        "hbl2d" => {
+            let model = crate::hbl2d::snapshot();
+            let mut import = column().gap(8).child(disabled(
+                button("导入模型（.hbm）", "hbl2d-import", true),
+                !crate::hbl2d::can_import(s),
+            ));
+            if model.busy {
+                import = import
+                    .child(text(&model.message, 14, MUTED))
+                    .child(progress_bar((model.sent * 100 / model.total.max(1)) as u64))
+                    .child(button("取消", "hbl2d-cancel", false));
+            } else if !model.message.is_empty() {
+                import = import.child(text(&model.message, 14, MUTED));
+            } else if !s.manager_connected() {
+                import = import.child(text("请先连接手环", 14, MUTED));
+            } else if !crate::hbl2d::module_ready(s) {
+                import = import.child(text("请启用 HBL2D 并按提示重启手环", 14, MUTED));
+            } else if s.resident_capabilities & 4 == 0 {
+                import = import.child(text(
+                    "当前 Chem 安装器缺少模型导入所需的通信接口",
+                    14,
+                    MUTED,
+                ));
+            }
+            root = root.child(import);
+        }
         "magic" => {
             let magic = crate::magic::snapshot();
             let blocked = magic.busy
@@ -1387,6 +1462,9 @@ fn build(s: &state::State) -> ui::Element {
         }
         "module-uploader" => {
             let message = match s.modules.iter().find(|m| m.id == s.module_detail) {
+                Some(m) if m.id == crate::hbl2d::LEGACY_ID => {
+                    "请返回模块列表卸载旧版，再导入 HBL2D 0.1.4 或更新版本。"
+                }
                 Some(m) if !m.music() => "此模块暂未提供内容上传器，可在模块列表中管理。",
                 Some(m) if !m.importable() => {
                     "请打开模块右侧的开关，重启手环并运行 Chem 后即可上传。"
@@ -1778,6 +1856,9 @@ pub async fn event(id: &str, payload: &str) {
 }
 fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
     use state::NoticeOwner::*;
+    if id.starts_with("hbl2d-") {
+        return Hbl2d;
+    }
     if id.starts_with("magic-") || id.starts_with("magic:") {
         return Magic;
     }
@@ -1800,6 +1881,7 @@ fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
             "local" => Local,
             "library" => Library,
             "magic" => Magic,
+            "hbl2d" => Hbl2d,
             _ => Modules,
         },
     }
@@ -1807,6 +1889,39 @@ fn notice_owner(id: &str, s: &state::State) -> state::NoticeOwner {
 async fn action(id: &str, _value: &str) -> Result<(), String> {
     if connection_blocked(&state::snapshot(), id) {
         return Err("请先连接手环并等待对应服务就绪".into());
+    }
+    if id == "chem-install" {
+        return crate::installer::start().await;
+    }
+    if id == "hbl2d-cancel" {
+        crate::hbl2d::cancel();
+        return Ok(());
+    }
+    if id == "hbl2d-import" {
+        let picked = dialog::pick_file(
+            dialog::PickConfig {
+                read: false,
+                copy_to: Some("data/imports".into()),
+            },
+            dialog::FilterConfig {
+                multiple: false,
+                extensions: vec!["hbm".into()],
+                default_directory: String::new(),
+                default_file_name: String::new(),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if picked.name.is_empty() {
+            return Ok(());
+        }
+        if Path::new(&picked.name).file_name().and_then(|n| n.to_str()) != Some(&picked.name) {
+            return Err("文件名称无效".into());
+        }
+        let path = format!("data/imports/{}", picked.name);
+        let result = crate::hbl2d::import(&path).await;
+        let _ = fs::remove_file(path);
+        return result;
     }
     if id == "magic-refresh" {
         return crate::magic::refresh().await;
@@ -1893,39 +2008,25 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
     {
         return Err("请先完成或取消下载".into());
     }
-    if id == "boot-toggle" || id.starts_with("safe-exit:") {
+    if id.starts_with("safe-exit:") {
         let s = state::snapshot();
         if module_busy(&s) {
             return Err("请先完成当前操作并连接管理器".into());
         }
-        let (title, content) = if id == "boot-toggle" {
-            if s.boot_status & 2 != 0 {
-                (
-                    "关闭自动启动？",
-                    "关闭后，重启手环需要手动运行 Chem 安装器。",
-                )
-            } else {
-                (
-                    "开启自动启动？",
-                    "之后重启手环会自动加载 Chem 和已启用模块。首次开启会修改固件启动脚本，请保持充电或电量达到 30%，操作期间不要重启手环。",
-                )
-            }
-        } else {
-            match id {
-                "safe-exit:0" => (
-                    "退出安全模式并重试？",
-                    "重启后重新尝试已启用的模块；如果启动再次失败，将返回安全模式。",
-                ),
-                "safe-exit:1" => (
-                    "停用全部模块后退出？",
-                    "保留模块和数据，停用全部模块；重启手环后退出安全模式。",
-                ),
-                "safe-exit:2" => (
-                    "回退更新后退出？",
-                    "撤销未运行的更新，回退有旧版本的模块，无可用旧版本的模块将停用。重启后退出安全模式。",
-                ),
-                _ => return Err("无效的恢复操作".into()),
-            }
+        let (title, content) = match id {
+            "safe-exit:0" => (
+                "退出安全模式并重试？",
+                "重启后重新尝试已启用的模块；如果启动再次失败，将返回安全模式。",
+            ),
+            "safe-exit:1" => (
+                "停用全部模块后退出？",
+                "保留模块和数据，停用全部模块；重启手环后退出安全模式。",
+            ),
+            "safe-exit:2" => (
+                "回退更新后退出？",
+                "撤销未运行的更新，回退有旧版本的模块，无可用旧版本的模块将停用。重启后退出安全模式。",
+            ),
+            _ => return Err("无效的恢复操作".into()),
         };
         let result = dialog::show_dialog(
             dialog::DialogType::Alert,
@@ -1951,16 +2052,12 @@ async fn action(id: &str, _value: &str) -> Result<(), String> {
         if result.clicked_btn_id != "confirm" {
             return Ok(());
         }
-        return if id == "boot-toggle" {
-            modules::set_boot(s.boot_status & 2 == 0).await
-        } else {
-            modules::exit_safe_mode(
-                id.trim_start_matches("safe-exit:")
-                    .parse()
-                    .map_err(|_| "无效的恢复操作")?,
-            )
-            .await
-        };
+        return modules::exit_safe_mode(
+            id.trim_start_matches("safe-exit:")
+                .parse()
+                .map_err(|_| "无效的恢复操作")?,
+        )
+        .await;
     }
     if id == "refresh" {
         connection::refresh(true).await;

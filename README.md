@@ -47,11 +47,15 @@ https://gh-proxy.com/ . Magic provides resource package import and management;
 other unsupported modules show their management controls only.
 
 Startup automatically checks the host connection, exact device identity and
-resident service. If Chem is not running, the client asks the user to run it on
-the wearable and continues service discovery. This plugin does not download,
-queue, inspect or switch Chem installer watchfaces and requests neither Queue nor
-Watchface permission. Framework version metadata is still refreshed from the cloud;
-a newer build shows a nonblocking notice at the top without disabling current use.
+resident service. When the service is unavailable or ChemCloud has a newer
+installer, click Install in the module list. ChemClient opens an installed
+installer or downloads and verifies it, hands it to the AstroBox queue, then
+switches to it after upload succeeds. Tap Run on the wearable to start Chem.
+If AstroBox's automatic local-resource installation is off, start the task from
+its installation queue. The installer uses the Queue and Watchface permissions.
+When updating an active Chem build, reboot the wearable and run the new installer.
+If autostart is enabled on an older build, turn it off in the wearable's Chem
+manager before rebooting.
 Cloud modules download, verify and import after one Install or Update click.
 No device page or manual module-connection sequence is needed.
 
@@ -95,7 +99,7 @@ resampling; selected compression runs first and memory stays bounded by windows.
 
 ## Build
 
-Requires AstroBox 2.2.0 with API 4 support. Install Clang/llvm-ar on PATH (or set
+Requires AstroBox 2.2.6 with API 4 queue support. Install Clang/llvm-ar on PATH (or set
 CC and AR), stable Rust, Python 3.11+ and
 wasm-component-ld >= 0.5.27 (available in recent nightly toolchains). The builder
 automatically finds a compatible linker; --component-linker accepts an explicit path.

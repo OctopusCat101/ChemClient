@@ -302,11 +302,11 @@ fn clicks_queued_by_an_old_page_are_ignored_even_after_returning_to_it() {
     crate::magic::test_view(Default::default());
     let mut s = fixture();
     let first = tree(&s);
-    let old = event_node(&first, "boot-toggle").events[0].1.clone();
-    assert_eq!(visible_event(&old, &s), Some("boot-toggle"));
+    let old = event_node(&first, "module-toggle:bluetooth_audio").events[0].1.clone();
+    assert_eq!(visible_event(&old, &s), Some("module-toggle:bluetooth_audio"));
     s.install_sent = 10;
     tree(&s);
-    assert_eq!(visible_event(&old, &s), Some("boot-toggle"));
+    assert_eq!(visible_event(&old, &s), Some("module-toggle:bluetooth_audio"));
     s.tab = "cloud".into();
     assert!(visible_event(&old, &s).is_none());
     tree(&s);

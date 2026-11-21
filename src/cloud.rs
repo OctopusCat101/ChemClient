@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Artifact {
     pub path: String,
     pub size: u64,
@@ -12,6 +13,27 @@ pub struct Artifact {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct FrameworkVersion {
     pub version: u32,
+    #[serde(default)]
+    pub face_id: String,
+    #[serde(flatten)]
+    pub artifact: Artifact,
+}
+impl Target {
+    pub fn installer(&self) -> Option<crate::installer::Release> {
+        let loader = &self.loader;
+        if self.local_only
+            || loader.face_id.len() != 9
+            || !loader.face_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let prefix = format!("{}/{}/chem-loader/", self.model, self.firmware);
+        artifact(&loader.artifact, 16 * 1024 * 1024, &prefix, "face").ok()?;
+        Some(crate::installer::Release {
+            face_id: loader.face_id.clone(),
+            artifact: loader.artifact.clone(),
+        })
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Module {

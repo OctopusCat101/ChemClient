@@ -49,6 +49,7 @@ fn with<R>(f: impl FnOnce(&mut Bootstrap) -> R) -> R {
         .unwrap_or_else(|e| e.into_inner()))
 }
 pub fn reset() {
+    crate::installer::reset();
     with(|b| {
         b.waiting_since = None;
         b.device_info = None;
@@ -58,6 +59,7 @@ pub fn reset() {
     });
 }
 pub fn connected() {
+    crate::installer::connected();
     with(|b| b.waiting_since = None);
     state::with(|s| {
         s.status.clear();
@@ -129,14 +131,14 @@ pub async fn start(addr: &str) -> Result<(), String> {
     if let Err(e) = cloud_download::catalog(addr) {
         // The request could not even be started, so no catalog_ready callback
         // will arrive. Mark it finished and keep local .chem import available.
-        state::with(|s| {
-            s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}")
-        });
+        state::with(|s| s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}"));
         with(|b| b.catalog_failed = true);
     }
     // Local service discovery must not wait for a cloud mirror or DeviceInfo.
-    if let Err(e) = modules::connect_device(addr).await {
-        state::with(|s| s.cloud_notice = e);
+    if !state::snapshot().installer.owns_transport() {
+        if let Err(e) = modules::connect_device(addr).await {
+            state::with(|s| s.cloud_notice = e);
+        }
     }
     if state::snapshot().connection_epoch != epoch {
         return Ok(());
@@ -210,6 +212,7 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         s.target = target.target.clone();
         s.firmware_sha256 = target.firmware_sha256.clone();
         s.expected_revision = target.loader.version;
+        s.installer.release = target.installer();
         s.cloud_modules = target.modules.clone();
         /* The device's capability word, not the cloud lookup, decides whether
          * native .chem upload is possible. */
@@ -229,7 +232,8 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
     });
     // Connection retries use the existing service loop, independent of watchfaces.
     with(|b| b.waiting_since = Some(Instant::now()));
-    if !state::snapshot().manager_busy {
+    let current = state::snapshot();
+    if !current.manager_busy && !current.installer.owns_transport() {
         modules::connect_device(addr).await?;
     }
     ui::rerender();

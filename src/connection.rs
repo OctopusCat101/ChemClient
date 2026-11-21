@@ -102,6 +102,7 @@ pub async fn tick() {
         || s.installing
         || s.discovering
         || s.manager_busy
+        || s.installer.owns_transport()
         || state::action_busy()
         || transfer::busy()
     {
@@ -324,7 +325,7 @@ pub async fn device_event() {
                 .map(|d| (d.addr.clone(), d.name.clone()))
                 .collect();
         });
-        if !current.manager_ready && !task_busy(&current) {
+        if !current.manager_ready && !current.installer.owns_transport() && !task_busy(&current) {
             let _ = modules::connect_device(&current.addr).await;
         }
         return;
@@ -386,6 +387,7 @@ fn disconnect(devices: Vec<(String, String)>) {
     modules::reset_connection();
     crate::bootstrap::reset();
     crate::magic::disconnected();
+    crate::hbl2d::transport_failed("手环已断开，请重新连接后导入");
     if crate::delivery::busy() {
         crate::delivery::fail("手环已断开，安装未完成，请重新连接后重试".into());
     }

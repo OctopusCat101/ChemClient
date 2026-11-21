@@ -10,6 +10,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Owner {
     Catalog,
+    Installer,
     Module(String),
 }
 #[derive(Clone, Debug)]
@@ -33,11 +34,13 @@ impl Progress {
 }
 enum Destination {
     Catalog,
+    Installer,
     Module { id: String, version: u32 },
 }
 struct Job {
     destination: Destination,
     addr: String,
+    epoch: u64,
     artifact: Option<cloud::Artifact>,
     response_length: Option<u64>,
     progress: Progress,
@@ -86,6 +89,7 @@ fn begin(
     let http = Http::start(&url)?;
     let owner = match &destination {
         Destination::Catalog => Owner::Catalog,
+        Destination::Installer => Owner::Installer,
         Destination::Module { id, .. } => Owner::Module(id.clone()),
     };
     let progress = Progress {
@@ -101,6 +105,7 @@ fn begin(
         *j = Some(Job {
             destination,
             addr: addr.into(),
+            epoch: s.connection_epoch,
             artifact: artifact.cloned(),
             response_length: None,
             progress: progress.clone(),
@@ -120,6 +125,9 @@ fn begin(
 }
 pub fn catalog(addr: &str) -> Result<(), String> {
     begin(addr, Destination::Catalog, None)
+}
+pub fn installer(addr: &str, artifact: &cloud::Artifact) -> Result<(), String> {
+    begin(addr, Destination::Installer, Some(artifact))
 }
 pub fn module(addr: &str, module: &cloud::Module) -> Result<(), String> {
     begin(
@@ -141,6 +149,9 @@ pub fn cancel(silent: bool) {
             match job.destination {
                 Destination::Catalog => {
                     crate::connection::failed("已取消检查，点击刷新重试".into())
+                }
+                Destination::Installer => {
+                    crate::installer::download_canceled(&job.addr, job.epoch);
                 }
                 Destination::Module { id, .. } => {
                     state::with(|s| s.module_message(&id, "", "已取消安装"))
@@ -230,7 +241,7 @@ pub async fn tick() {
         let job = slot.as_mut()?;
         // Device changes invalidate both the download and its future install action.
         let s = state::snapshot();
-        if s.addr != job.addr || !s.connected_devices.contains(&job.addr) {
+        if s.addr != job.addr || s.connection_epoch != job.epoch || !s.device_connected() {
             return Some(Err("手环连接已变化，请刷新后重试".to_string()));
         }
         if let Err(e) = check_deadline(job.started.elapsed(), job.last_byte.elapsed()) {
@@ -279,13 +290,20 @@ pub async fn tick() {
             });
             // Render completion before verification and delivery.
             ui::rerender();
-            if state::snapshot().addr != job.addr {
+            let s = state::snapshot();
+            if s.addr != job.addr || s.connection_epoch != job.epoch || !s.device_connected() {
                 ui::rerender();
                 timer::clear_timer(job.timer);
                 return;
             }
             drop(job.http);
             match job.destination {
+                Destination::Installer => {
+                    // ChemCloud .face files contain the raw Xiaomi watchface binary.
+                    let file = result
+                        .and_then(|_| save(&job.bytes, job.artifact.as_ref().unwrap(), "bin"));
+                    crate::installer::downloaded(&job.addr, job.epoch, file).await;
+                }
                 Destination::Catalog => {
                     let catalog = result
                         .and_then(|_| {

@@ -29,6 +29,10 @@ impl Module {
             "NoirMusic"
         } else if self.id == "com.chem.magic" {
             "Magic"
+        } else if self.id == crate::hbl2d::ID {
+            "HBL2D"
+        } else if self.id == crate::hbl2d::LEGACY_ID {
+            "HBL2D（旧版）"
         } else {
             &self.id
         }
@@ -294,6 +298,7 @@ fn fail(error: String) {
         crate::delivery::fail(error.clone());
     }
     crate::magic::transport_failed(&error);
+    crate::hbl2d::transport_failed(&error);
     if !crate::bootstrap::probe_failed(&error) {
         connection::failed(error);
     }
@@ -484,16 +489,25 @@ pub async fn received(payload: &str) {
         return;
     }
     if op == 29 {
-        crate::magic::management_response(result, data).await;
+        if crate::hbl2d::busy() {
+            crate::hbl2d::received(result, data).await;
+        } else {
+            crate::magic::management_response(result, data).await;
+        }
         return;
     }
     if crate::delivery::busy() {
         crate::delivery::received(op, result, data).await;
         return;
     }
-    if matches!(op, 19 | 20 | 22) && result != 5 && result != 8 {
-        let error = word(data, if op == 20 { 4 } else { 0 }).unwrap_or(0) as i32;
-        state::with(|s| s.notice(state::NoticeOwner::Modules, setting_error(op, error)));
+    if op == 22 && result != 5 && result != 8 {
+        let error = word(data, 0).unwrap_or(0) as i32;
+        state::with(|s| {
+            s.notice(
+                state::NoticeOwner::Modules,
+                format!("恢复设置失败（错误 {error}），请刷新确认当前状态"),
+            )
+        });
         ui::rerender();
         return;
     }
@@ -510,28 +524,17 @@ pub async fn received(payload: &str) {
         }
         return;
     }
-    if op == 19 || op == 20 {
+    if op == 19 {
         if data.len() != 8 {
-            fail("自动启动状态格式不匹配".into());
+            fail("设备状态格式不匹配".into());
             return;
         }
         state::with(|s| {
             s.boot_status = word(data, 0).unwrap_or(0);
             s.safe_exit_pending = s.boot_status & 4 != 0;
-            if op == 20 {
-                s.status_owner = state::NoticeOwner::Modules;
-                s.status = if s.boot_status & 2 != 0 {
-                    "自动启动已开启"
-                } else {
-                    "自动启动已关闭"
-                }
-                .into();
-            }
         });
-        if op == 19 {
-            if let Err(e) = send_inner(0x100, 0u32.to_le_bytes().to_vec(), background).await {
-                fail(e);
-            }
+        if let Err(e) = send_inner(0x100, 0u32.to_le_bytes().to_vec(), background).await {
+            fail(e);
         }
         ui::rerender();
         return;
@@ -975,21 +978,6 @@ mod tests {
     }
 }
 
-pub async fn set_boot(enabled: bool) -> Result<(), String> {
-    let s = state::snapshot();
-    if !s.manager_connected()
-        || s.manager_busy
-        || s.active
-        || s.installing
-        || s.downloading_artifact()
-    {
-        return Err("请先完成当前操作并连接管理器".into());
-    }
-    if s.boot_status & 1 == 0 {
-        return Err("当前固件不支持自动启动".into());
-    }
-    send(20, (enabled as u32).to_le_bytes().to_vec()).await
-}
 pub async fn exit_safe_mode(action: u32) -> Result<(), String> {
     let s = state::snapshot();
     if !s.manager_connected()
@@ -1003,41 +991,4 @@ pub async fn exit_safe_mode(action: u32) -> Result<(), String> {
         return Err("请刷新确认安全模式状态并完成当前操作".into());
     }
     send(22, action.to_le_bytes().to_vec()).await
-}
-
-fn setting_error(op: u32, error: i32) -> String {
-    if op == 19 || op == 20 {
-        let text = match error {
-            -30 => "当前固件不支持自动启动",
-            -31 => "暂无法读取手环电量，请稍后重试",
-            -32 => "请保持手环充电或电量达到 30%",
-            -33 => "启动文件未就绪，请重新运行最新版 Chem 安装器",
-            -34 => "启动文件与固件不匹配，请更新并运行安装器",
-            -35 => "固件启动区域校验不符，已停止修改",
-            -36 => "启动设置写入失败，请重新运行安装器后重试",
-            -37 => "手环内存不足，请重启后重试",
-            -38 => "Flash 尚未就绪，请稍后重试",
-            -39 => "启动探测写入被拒绝，已停止修改",
-            -40 => "启动探测读回不符，未擦除启动区域",
-            -41 => "启动区域擦除失败，请保留错误码",
-            -42 => "启动脚本写入失败，请保留错误码",
-            -43 => "Flash 同步失败，请保留错误码",
-            -44 => "启动脚本读回校验失败，请保留错误码",
-            -16 => "设备未就绪，请更新并运行最新版 Chem 安装器后重试",
-            _ => return format!("设置失败（错误 {error}），请刷新确认当前状态"),
-        };
-        return text.into();
-    }
-    format!("恢复设置失败（错误 {error}），请刷新确认当前状态")
-}
-
-#[cfg(test)]
-mod boot_error_tests {
-    #[test]
-    fn power_read_low_power_and_registry_errors_stay_distinct() {
-        assert!(super::setting_error(20, -31).contains("读取"));
-        assert!(super::setting_error(20, -32).contains("30%"));
-        assert!(!super::setting_error(22, -16).contains("30%"));
-        assert!(!super::setting_error(20, -36).contains("已保留"));
-    }
 }

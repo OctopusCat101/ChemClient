@@ -345,6 +345,24 @@ interface queue {
     }
 
     add-resource-to-queue: func(res-type: resource-type, file-path: string);
+
+    variant install-source {
+        file(string),
+        bytes(list<u8>),
+    }
+
+    record install-task {
+        name: string,
+        description: option<string>,
+        icon: option<string>,
+        device-addr: string,
+        res-type: resource-type,
+        source: install-source,
+        watchface-id: option<string>,
+    }
+
+    enqueue-install: async func(task: install-task) -> result<string, string>;
+    cancel-task: async func(task-id: string) -> result<_, string>;
 }
 
 interface timer {

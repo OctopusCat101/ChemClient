@@ -9,6 +9,8 @@ mod cloud_download;
 mod connection;
 mod deadline;
 mod delivery;
+mod hbl2d;
+mod installer;
 mod magic;
 mod modules;
 mod netease;
@@ -63,6 +65,7 @@ impl event::Guest for ChemClient {
                     "chem-manager" => modules::tick().await,
                     "chem-download" => cloud_download::tick().await,
                     "chem-connection" => {
+                        installer::tick().await;
                         connection::tick().await;
                         prepared::tick().await;
                     }
@@ -73,6 +76,7 @@ impl event::Guest for ChemClient {
             event::EventType::DeviceAction => {
                 connection::device_event().await;
             }
+            event::EventType::PluginMessage => installer::received(&payload),
             _ => {}
         }
         String::new()
