@@ -148,7 +148,7 @@ pub fn cancel(silent: bool) {
         if !silent {
             match job.destination {
                 Destination::Catalog => {
-                    crate::connection::failed("已取消检查，点击刷新重试".into())
+                    crate::bootstrap::catalog_failed("已取消检查，点击刷新重试")
                 }
                 Destination::Installer => {
                     crate::installer::download_canceled(&job.addr, job.epoch);

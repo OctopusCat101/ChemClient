@@ -43,7 +43,7 @@ NoirMusic builds, then reload this plugin. Music uses `com.chem.music`.
 Native .chem installation validates the signed receipt, target and firmware, then
 streams directly to Chem. Cloud refresh lists compatible modules with Install
 and Update actions. cloud.json points to OctopusCat101/ChemCloud through
-https://gh-proxy.com/ . Magic provides resource package import and management;
+https://gh-proxy.org/ . Magic provides resource package import and management;
 other unsupported modules show their management controls only.
 
 Startup automatically checks the host connection, exact device identity and

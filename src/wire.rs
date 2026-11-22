@@ -1,44 +1,44 @@
 //! One host BLE write at a time, shared by management and music.
-use std::{
-    sync::{Mutex, OnceLock},
-    task::{Poll, Waker},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Default)]
-struct Gate {
-    busy: bool,
-    waiters: Vec<Waker>,
-}
-static GATE: OnceLock<Mutex<Gate>> = OnceLock::new();
-fn gate() -> &'static Mutex<Gate> {
-    GATE.get_or_init(Default::default)
-}
+static BUSY: AtomicBool = AtomicBool::new(false);
+
 pub struct Guard;
 pub async fn acquire() -> Guard {
-    std::future::poll_fn(|cx| {
-        let mut g = gate().lock().unwrap_or_else(|e| e.into_inner());
-        if !g.busy {
-            g.busy = true;
-            Poll::Ready(Guard)
+    loop {
+        if BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Guard;
+        }
+        wait_for_retry().await;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait_for_retry() {
+    // Different AstroBox callbacks run as separate component tasks. A Rust
+    // waker alone cannot suspend or wake those tasks in this build.
+    crate::wasi::clocks::monotonic_clock::wait_for(10_000_000).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_retry() {
+    let mut yielded = false;
+    std::future::poll_fn(|context| {
+        if std::mem::replace(&mut yielded, true) {
+            std::task::Poll::Ready(())
         } else {
-            if !g.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                g.waiters.push(cx.waker().clone());
-            }
-            Poll::Pending
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
         }
     })
-    .await
+    .await;
 }
 impl Drop for Guard {
     fn drop(&mut self) {
-        let waiters = {
-            let mut g = gate().lock().unwrap_or_else(|e| e.into_inner());
-            g.busy = false;
-            std::mem::take(&mut g.waiters)
-        };
-        for w in waiters {
-            w.wake();
-        }
+        BUSY.store(false, Ordering::Release);
     }
 }
 
@@ -48,7 +48,7 @@ mod tests {
     use std::{
         future::Future,
         sync::Arc,
-        task::{Context, Wake},
+        task::{Context, Poll, Wake, Waker},
     };
     struct Noop;
     impl Wake for Noop {

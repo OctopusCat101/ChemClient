@@ -48,8 +48,11 @@ pub async fn start(path: &str, expected: Option<(&str, u32)>) -> Result<(), Stri
     if busy() || s.active || s.manager_busy || s.connection.busy() || !s.manager_connected() {
         return Err("请等待连接及当前操作完成".into());
     }
-    if !s.native_delivery || s.target.is_empty() {
+    if !s.native_delivery {
         return Err("请先更新并运行最新 Chem 安装器".into());
+    }
+    if s.target.is_empty() || s.firmware_sha256.is_empty() {
+        return Err("暂未确认手环固件，无法校验 .chem，请刷新后重试".into());
     }
     let package = Package::open(path, &s.target, &s.firmware_sha256)?;
     let m = &package.manifest;

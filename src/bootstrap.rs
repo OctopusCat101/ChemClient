@@ -21,7 +21,7 @@ struct Bootstrap {
     identification_error: Option<String>,
 }
 impl Bootstrap {
-    fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog)> {
+    fn take_ready(&mut self) -> Option<(Vec<u8>, cloud::Catalog, bool)> {
         if self.device_info.is_none() {
             return None;
         }
@@ -38,7 +38,7 @@ impl Bootstrap {
         } else {
             return None; /* catalog request still in flight */
         };
-        Some((self.device_info.take().unwrap(), catalog))
+        Some((self.device_info.take().unwrap(), catalog, self.catalog_failed))
     }
 }
 static BOOT: OnceLock<Mutex<Bootstrap>> = OnceLock::new();
@@ -129,15 +129,12 @@ pub async fn start(addr: &str) -> Result<(), String> {
     });
     ui::rerender();
     if let Err(e) = cloud_download::catalog(addr) {
-        // The request could not even be started, so no catalog_ready callback
-        // will arrive. Mark it finished and keep local .chem import available.
-        state::with(|s| s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}"));
-        with(|b| b.catalog_failed = true);
+        catalog_failed(&e);
     }
     // Local service discovery must not wait for a cloud mirror or DeviceInfo.
     if !state::snapshot().installer.owns_transport() {
         if let Err(e) = modules::connect_device(addr).await {
-            state::with(|s| s.cloud_notice = e);
+            tracing::warn!("initial Chem service probe failed: {e}");
         }
     }
     if state::snapshot().connection_epoch != epoch {
@@ -152,7 +149,11 @@ pub async fn start(addr: &str) -> Result<(), String> {
     {
         Ok(reply) => reply,
         Err(e) => {
-            state::with(|s| s.cloud_notice = e);
+            state::with(|s| {
+                if s.connection_epoch == epoch && s.cloud_notice.is_empty() {
+                    s.cloud_notice = e;
+                }
+            });
             return Ok(());
         }
     };
@@ -161,6 +162,10 @@ pub async fn start(addr: &str) -> Result<(), String> {
     }
     with(|b| b.device_info = Some(reply));
     prepare_ready(addr).await
+}
+pub fn catalog_failed(error: &str) {
+    with(|b| b.catalog_failed = true);
+    state::with(|s| s.cloud_notice = format!("获取云端清单失败：{error}"));
 }
 pub async fn catalog_ready(
     addr: &str,
@@ -172,26 +177,21 @@ pub async fn catalog_ready(
     }
     match result {
         Ok(catalog) => with(|b| b.catalog = Some(catalog)),
-        Err(e) => {
-            state::with(|s| {
-                s.cloud_notice = format!("获取云端清单失败，本地 .chem 导入仍可用：{e}")
-            });
-            /* Do not return: prepare_ready() also fills target and the exact
-             * firmware digest used to verify a local .chem receipt. An empty
-             * catalog resolves that from the built-in identity table. */
-            with(|b| b.catalog_failed = true);
-        }
+        Err(e) => catalog_failed(&e),
     }
     prepare_ready(addr).await?;
     ui::rerender();
     Ok(())
 }
 async fn prepare_ready(addr: &str) -> Result<(), String> {
-    let Some((reply, catalog)) = with(Bootstrap::take_ready) else {
+    let Some((reply, catalog, catalog_failed)) = with(Bootstrap::take_ready) else {
         return Ok(());
     };
     let target = match identify(&reply, &catalog) {
         Ok(t) => t,
+        // Without the catalog, a missing identity cannot establish that the
+        // firmware is unsupported. Keep the Chem service probe independent.
+        Err(_) if catalog_failed => return Ok(()),
         Err(e) => {
             with(|b| b.identification_error = Some(e.clone()));
             return Err(e);
@@ -217,14 +217,11 @@ async fn prepare_ready(addr: &str) -> Result<(), String> {
         /* The device's capability word, not the cloud lookup, decides whether
          * native .chem upload is possible. */
         s.native_delivery = s.resident_capabilities & 1 != 0;
-        if local_only {
-            s.cloud_notice = format!(
-                "已识别 {}：云端清单不可用，已改用本地精确身份；可直接导入 .chem（需设备端启用原生传输）。",
-                target.target
-            );
+        if local_only && !catalog_failed {
+            s.cloud_notice = "云端清单暂无此固件的可下载内容".into();
         }
     });
-    if s.manager_ready {
+    if s.manager_ready || catalog_failed {
         return Ok(());
     }
     state::with(|s| {
@@ -257,7 +254,8 @@ mod tests {
             } else {
                 b.catalog = Some(cloud::fixture().unwrap());
             }
-            let (reply, catalog) = b.take_ready().unwrap();
+            let (reply, catalog, failed) = b.take_ready().unwrap();
+            assert!(!failed);
             assert!(identify(&reply, &catalog).is_ok());
             assert!(b.take_ready().is_none());
         }
@@ -268,7 +266,8 @@ mod tests {
         b.device_info = Some(packet("3.1.28", "M2456B1"));
         assert!(b.take_ready().is_none()); // catalog request still in flight
         b.catalog_failed = true;
-        let (reply, catalog) = b.take_ready().unwrap();
+        let (reply, catalog, failed) = b.take_ready().unwrap();
+        assert!(failed);
         assert!(catalog.targets.is_empty());
         let target = identify(&reply, &catalog).expect("built-in o66nfc identity");
         assert_eq!(target.target, "xiaomi-band-10-nfc-3.1.28");
@@ -289,6 +288,52 @@ mod tests {
         let mut info = field(2, firmware.as_bytes());
         info.extend(field(4, model.as_bytes()));
         field(4, &field(3, &info))
+    }
+    #[test]
+    fn failed_catalog_preserves_band9_manager_in_either_order() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
+
+        let saved = state::snapshot();
+        for catalog_first in [false, true] {
+            reset();
+            state::with(|s| {
+                *s = state::State {
+                    addr: "band".into(),
+                    connected_devices: vec!["band".into()],
+                    connection: Phase::Ready,
+                    manager_ready: true,
+                    resident_target: "xiaomi-band-9-3.1.35".into(),
+                    ..Default::default()
+                };
+            });
+            let info = packet("3.1.35", "M2346B1");
+            let mut cx = Context::from_waker(Waker::noop());
+            if catalog_first {
+                catalog_failed("timeout");
+                with(|b| b.device_info = Some(info));
+                assert_eq!(
+                    pin!(prepare_ready("band")).poll(&mut cx),
+                    Poll::Ready(Ok(()))
+                );
+            } else {
+                with(|b| b.device_info = Some(info));
+                assert_eq!(
+                    pin!(catalog_ready("band", Err("timeout".into()))).poll(&mut cx),
+                    Poll::Ready(Ok(()))
+                );
+            }
+            let s = state::snapshot();
+            assert!(s.manager_connected());
+            assert_eq!(s.cloud_notice, "获取云端清单失败：timeout");
+            assert!(s.target.is_empty() && s.firmware_sha256.is_empty());
+            assert!(with(|b| b.identification_error.is_none()));
+        }
+        reset();
+        state::with(|s| *s = saved);
     }
     #[test]
     fn exact_device_and_firmware_gate_cloud_modules() {
